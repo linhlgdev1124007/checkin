@@ -8,7 +8,7 @@ export interface LoginKeyParts {
 }
 
 export function generateLoginKey(): LoginKeyParts & { key: string } {
-  const publicId = randomBytes(8).toString('base64url').slice(0, 10);
+  const publicId = randomBytes(5).toString('hex');
   const secret = randomBytes(32).toString('base64url');
   return { publicId, secret, key: `ck_${publicId}_${secret}` };
 }
@@ -17,4 +17,3 @@ export function parseLoginKey(value: string): LoginKeyParts | null {
   const match = KEY_PATTERN.exec(value.trim());
   return match ? { publicId: match[1], secret: match[2] } : null;
 }
-
