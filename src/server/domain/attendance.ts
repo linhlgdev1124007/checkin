@@ -1,7 +1,8 @@
 export type AttendanceEvent =
   | { type: 'CHECKED_IN'; sessionId: string; at: string }
   | { type: 'CHECKED_OUT'; sessionId: string; at: string }
-  | { type: 'ATTENDANCE_CORRECTED'; sessionId: string; startAt: string; endAt: string | null; reason: string };
+  | { type: 'ATTENDANCE_CORRECTED'; sessionId: string; startAt: string; endAt: string | null; reason: string }
+  | { type: 'ATTENDANCE_ADJUSTED'; adjustmentMilliseconds: number; reason: string };
 
 export interface AttendanceSession {
   sessionId: string;
@@ -19,8 +20,16 @@ export interface AttendanceProjection {
 
 export function applyAttendanceEvents(events: AttendanceEvent[]): AttendanceProjection {
   const sessions = new Map<string, AttendanceSession>();
+  let adjustmentMilliseconds = 0;
 
   for (const event of events) {
+    if (event.type === 'ATTENDANCE_ADJUSTED') {
+      if (!Number.isSafeInteger(event.adjustmentMilliseconds) || event.adjustmentMilliseconds === 0) {
+        throw new Error('INVALID_ATTENDANCE_ADJUSTMENT');
+      }
+      adjustmentMilliseconds += event.adjustmentMilliseconds;
+      continue;
+    }
     if (event.type === 'CHECKED_IN') {
       if ([...sessions.values()].some((session) => session.effectiveEndAt === null)) {
         throw new Error('ALREADY_CHECKED_IN');
@@ -52,12 +61,14 @@ export function applyAttendanceEvents(events: AttendanceEvent[]): AttendanceProj
 
   const values = [...sessions.values()];
   validateNoOverlap(values);
+  const completedMilliseconds = values.reduce((total, session) => {
+    if (!session.effectiveEndAt) return total;
+    return total + Date.parse(session.effectiveEndAt) - Date.parse(session.effectiveStartAt);
+  }, adjustmentMilliseconds);
+  if (completedMilliseconds < 0) throw new Error('NEGATIVE_ATTENDANCE_TOTAL');
   return {
     sessions: values,
-    completedMilliseconds: values.reduce((total, session) => {
-      if (!session.effectiveEndAt) return total;
-      return total + Date.parse(session.effectiveEndAt) - Date.parse(session.effectiveStartAt);
-    }, 0),
+    completedMilliseconds,
     openSession: values.find((session) => session.effectiveEndAt === null) ?? null,
   };
 }

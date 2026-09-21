@@ -28,6 +28,22 @@ describe('attendance projection', () => {
       { type: 'ATTENDANCE_CORRECTED', sessionId: 'a', startAt: '2026-09-20T02:00:00.000Z', endAt: '2026-09-20T01:00:00.000Z', reason: 'invalid' },
     ])).toThrow('INVALID_ATTENDANCE_RANGE');
   });
+
+  it('adds signed administrative adjustments to completed time', () => {
+    const projection = applyAttendanceEvents([
+      { type: 'CHECKED_IN', sessionId: 'a', at: '2026-09-20T00:00:00.000Z' },
+      { type: 'CHECKED_OUT', sessionId: 'a', at: '2026-09-20T01:00:00.000Z' },
+      { type: 'ATTENDANCE_ADJUSTED', adjustmentMilliseconds: 1_800_000, reason: 'Bổ sung họp' },
+      { type: 'ATTENDANCE_ADJUSTED', adjustmentMilliseconds: -600_000, reason: 'Trừ thời gian nghỉ' },
+    ]);
+    expect(projection.completedMilliseconds).toBe(4_800_000);
+  });
+
+  it('rejects adjustments that make completed time negative', () => {
+    expect(() => applyAttendanceEvents([
+      { type: 'ATTENDANCE_ADJUSTED', adjustmentMilliseconds: -60_000, reason: 'Không hợp lệ' },
+    ])).toThrow('NEGATIVE_ATTENDANCE_TOTAL');
+  });
 });
 
 describe('duration formatting', () => {
