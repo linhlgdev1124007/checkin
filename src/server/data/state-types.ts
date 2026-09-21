@@ -9,6 +9,7 @@ export interface AccountRecord {
   role: Role;
   active: boolean;
   profile: SealedValue;
+  securityTag: string;
   createdAt: string;
 }
 
@@ -27,6 +28,7 @@ export interface EventRecord {
 export interface SessionRecord {
   tokenHash: string;
   accountId: string;
+  credentialPublicId: string;
   bootId: string;
   expiresAt: string;
 }
@@ -35,7 +37,7 @@ export interface OutboxRecord {
   id: string;
   eventId: string;
   message: SealedValue;
-  status: 'pending' | 'sent';
+  status: 'pending' | 'sending' | 'sent';
   attempts: number;
   nextAttemptAt: string;
   lastError: string | null;
@@ -56,4 +58,3 @@ export interface StateDocument {
   sessions: SessionRecord[];
   outbox: OutboxRecord[];
 }
-

@@ -42,6 +42,8 @@ COOKIE_SECURE=false
 
 Check-in/out vẫn thành công khi Telegram lỗi. Hệ thống giữ tin trong outbox, tự thử lại và cho admin thử lại thủ công trong trang Vận hành.
 
+Nếu process dừng đúng lúc Telegram đã nhận tin nhưng database chưa kịp xác nhận, item giữ trạng thái `Đang gửi` và không tự gửi lại để tránh tin trùng. Admin đối chiếu nhóm Telegram rồi chọn Thử lại nếu tin thực tế chưa xuất hiện.
+
 ## Backup và cập nhật
 
 Admin xuất backup mã hóa trong trang Vận hành và phải nhập lại admin key. Hãy lưu file ở vị trí tách khỏi VPS. File chỉ phục hồi được bằng admin key tương ứng.
@@ -65,7 +67,7 @@ npm run typecheck
 npm run build
 ```
 
-Chạy PostgreSQL rồi đặt `DATABASE_URL`, `APP_ORIGIN=http://localhost:5173`, `COOKIE_SECURE=false`. Chạy API bằng `npm run dev` và Vite bằng `npm run dev:client`.
+Chạy PostgreSQL rồi đặt `DATABASE_URL` hoặc bộ biến `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`; đồng thời đặt `APP_ORIGIN=http://localhost:5173`, `COOKIE_SECURE=false`. Chạy API bằng `npm run dev` và Vite bằng `npm run dev:client`.
 
 ## Giới hạn bảo mật
 

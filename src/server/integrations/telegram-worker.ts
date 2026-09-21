@@ -1,24 +1,43 @@
-import type { CheckinService } from '../application/checkin-service.js';
-
 export type TelegramSender = (text: string) => Promise<void>;
+interface OutboxService {
+  takeDueOutbox(now?: Date): Promise<{ id: string; text: string } | null>;
+  finishOutbox(id: string, error: string | null, now?: Date): Promise<void>;
+}
 
 export class TelegramWorker {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private readonly pendingCompletions = new Map<string, { error: string | null; at: Date }>();
 
-  constructor(private readonly service: CheckinService, private readonly send: TelegramSender) {}
+  constructor(
+    private readonly service: OutboxService,
+    private readonly send: TelegramSender,
+    private readonly reportError: (error: Error) => void = (error) => console.error('Telegram worker:', error.message),
+  ) {}
 
   async deliverOnce(now = new Date()): Promise<boolean> {
-    const item = await this.service.takeDueOutbox(now);
-    if (!item) return false;
     try {
-      await this.send(item.text);
-      await this.service.finishOutbox(item.id, null, now);
+      const pending = this.pendingCompletions.entries().next().value as [string, { error: string | null; at: Date }] | undefined;
+      if (pending) {
+        const [id, completion] = pending;
+        await this.service.finishOutbox(id, completion.error, completion.at);
+        this.pendingCompletions.delete(id);
+        return true;
+      }
+      const item = await this.service.takeDueOutbox(now);
+      if (!item) return false;
+      try {
+        await this.send(item.text);
+      } catch (error) {
+        await this.persistCompletion(item.id, errorMessage(error), now);
+        return true;
+      }
+      await this.persistCompletion(item.id, null, now);
+      return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Telegram delivery failed';
-      await this.service.finishOutbox(item.id, message, now);
+      this.reportError(asError(error));
+      return false;
     }
-    return true;
   }
 
   start(intervalMilliseconds = 2_000): void {
@@ -26,7 +45,7 @@ export class TelegramWorker {
     this.timer = setInterval(() => {
       if (this.running) return;
       this.running = true;
-      void this.deliverOnce().finally(() => { this.running = false; });
+      void this.deliverOnce().catch((error) => this.reportError(asError(error))).finally(() => { this.running = false; });
     }, intervalMilliseconds);
     this.timer.unref();
   }
@@ -35,7 +54,19 @@ export class TelegramWorker {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
+
+  private async persistCompletion(id: string, error: string | null, now: Date): Promise<void> {
+    try {
+      await this.service.finishOutbox(id, error, now);
+    } catch (cause) {
+      this.pendingCompletions.set(id, { error, at: now });
+      this.reportError(asError(cause));
+    }
+  }
 }
+
+function asError(value: unknown): Error { return value instanceof Error ? value : new Error('Telegram worker failure'); }
+function errorMessage(value: unknown): string { return value instanceof Error ? value.message : 'Telegram delivery failed'; }
 
 export function createTelegramSender(botToken: string, chatId: string): TelegramSender {
   return async (text: string) => {
@@ -49,4 +80,3 @@ export function createTelegramSender(botToken: string, chatId: string): Telegram
     if (!response.ok || !result?.ok) throw new Error(result?.description ?? `Telegram HTTP ${response.status}`);
   };
 }
-

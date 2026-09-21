@@ -39,8 +39,8 @@ export function applyAttendanceEvents(events: AttendanceEvent[]): AttendanceProj
     if (!session) throw new Error('ATTENDANCE_SESSION_NOT_FOUND');
 
     if (event.type === 'CHECKED_OUT') {
-      if (session.originalEndAt !== null) throw new Error('ALREADY_CHECKED_OUT');
-      session.originalEndAt = event.at;
+      if (session.effectiveEndAt !== null) throw new Error('ALREADY_CHECKED_OUT');
+      if (session.originalEndAt === null) session.originalEndAt = event.at;
       session.effectiveEndAt = event.at;
     } else {
       session.effectiveStartAt = event.startAt;

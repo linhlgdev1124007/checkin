@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CheckinService } from '../../src/server/application/checkin-service.js';
-import { MemoryStateRepository } from '../../src/server/data/state-repository.js';
+import { MemoryStateRepository, type StateRepository } from '../../src/server/data/state-repository.js';
+import type { StateDocument } from '../../src/server/data/state-types.js';
 import { Vault } from '../../src/server/security/vault.js';
 
 describe('CheckinService', () => {
@@ -58,6 +59,35 @@ describe('CheckinService', () => {
     await expect(service.authenticate(login.token)).rejects.toThrow('UNAUTHORIZED');
   });
 
+  it('rejects a login that races with credential rotation', async () => {
+    const inner = new MemoryStateRepository();
+    const pausing = new PausingRepository(inner);
+    const raceService = new CheckinService(pausing, new Vault('race-boot'));
+    const admin = await raceService.setup('Admin');
+    const actor = await raceService.authenticate(admin.token);
+    const member = await raceService.createAccount(actor, 'Nguyễn An');
+    const gate = pausing.pauseNextMutation();
+
+    const staleLogin = raceService.login(member.key);
+    await gate.reached;
+    await raceService.rotateMemberKey(actor, member.account.id);
+    gate.release();
+
+    await expect(staleLogin).rejects.toThrow('INVALID_KEY');
+  });
+
+  it('rejects account authorization metadata modified outside the encrypted workflow', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const login = await service.login(member.key);
+    await repository.mutate((state) => {
+      const account = state.accounts.find((candidate) => candidate.id === member.account.id)!;
+      account.role = 'admin';
+    });
+    await expect(service.authenticate(login.token)).rejects.toThrow('INVALID_ACCOUNT_INTEGRITY');
+  });
+
   it('records one open session and atomically queues Telegram messages', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
@@ -97,6 +127,22 @@ describe('CheckinService', () => {
     )).toHaveLength(3);
   });
 
+  it('allows checkout after an administrator reopens a completed session', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const memberActor = await service.authenticate((await service.login(member.key)).token);
+    const started = await service.checkIn(memberActor, new Date('2026-09-20T00:00:00.000Z'));
+    await service.checkOut(memberActor, new Date('2026-09-20T01:00:00.000Z'));
+    await service.correctAttendance(actor, member.account.id, started.sessionId, {
+      startAt: '2026-09-20T00:00:00.000Z', endAt: null, reason: 'Checkout nhầm',
+    }, new Date('2026-09-20T01:30:00.000Z'));
+
+    await service.checkOut(memberActor, new Date('2026-09-20T02:00:00.000Z'));
+    const row = (await service.dashboard(actor)).members.find((item) => item.id === member.account.id);
+    expect(row).toMatchObject({ isOnline: false, completedMilliseconds: 7_200_000 });
+  });
+
   it('round-trips a backup and rejects a modified backup without changing state', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
@@ -104,7 +150,9 @@ describe('CheckinService', () => {
     const backup = await service.exportBackup(actor, admin.key);
 
     const parsed = JSON.parse(backup) as { sealed: { ciphertext: string } };
-    parsed.sealed.ciphertext = `${parsed.sealed.ciphertext.slice(0, -1)}A`;
+    const ciphertext = Buffer.from(parsed.sealed.ciphertext, 'base64url');
+    ciphertext[0] ^= 1;
+    parsed.sealed.ciphertext = ciphertext.toString('base64url');
     const before = JSON.stringify(await repository.read());
     await expect(service.importBackup(actor, admin.key, JSON.stringify(parsed))).rejects.toThrow('INVALID_BACKUP');
     expect(JSON.stringify(await repository.read())).toBe(before);
@@ -116,3 +164,31 @@ describe('CheckinService', () => {
     expect((await cleanRepository.read())?.accounts).toHaveLength(2);
   });
 });
+
+class PausingRepository implements StateRepository {
+  private gate: { reached: () => void; wait: Promise<void> } | null = null;
+
+  constructor(private readonly inner: StateRepository) {}
+
+  pauseNextMutation(): { reached: Promise<void>; release: () => void } {
+    let announce!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { announce = resolve; });
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    this.gate = { reached: announce, wait };
+    return { reached, release };
+  }
+
+  read() { return this.inner.read(); }
+  initialize(document: StateDocument) { return this.inner.initialize(document); }
+  replace(document: StateDocument) { return this.inner.replace(document); }
+  async mutate<T>(operation: (draft: StateDocument) => Promise<T> | T): Promise<T> {
+    const gate = this.gate;
+    if (gate) {
+      this.gate = null;
+      gate.reached();
+      await gate.wait;
+    }
+    return this.inner.mutate(operation);
+  }
+}

@@ -17,22 +17,36 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
   </main>;
 }
 
-export function SetupScreen({ api, onReady }: { api: Api; onReady: (account: Account) => void }) {
+export function SetupScreen({ api, onReady, onRestored }: { api: Api; onReady: (account: Account) => void; onRestored: () => void }) {
   const [name, setName] = useState('');
   const [result, setResult] = useState<{ key: string; account: Account } | null>(null);
+  const [restoreMode, setRestoreMode] = useState(false);
+  const [restoreKey, setRestoreKey] = useState('');
+  const [backupFile, setBackupFile] = useState<File | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError('');
     try { setResult(await api.setup(name)); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không thể khởi tạo.'); }
   };
+  const restore = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!backupFile) return;
+    setError('');
+    try {
+      await api.restore(restoreKey, await backupFile.text());
+      onRestored();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Không thể khôi phục backup.');
+    }
+  };
   if (result) return <AuthCard icon={<KeyRound />} title="Lưu key này ngay" subtitle="Key sẽ không xuất hiện lại. Nếu mất key, dữ liệu không thể phục hồi.">
     <div className="key-box"><code>{result.key}</code><button aria-label="Sao chép key" onClick={() => void navigator.clipboard?.writeText(result.key)}><Clipboard size={18}/></button></div>
     <label className="check-row"><input type="checkbox" checked={saved} onChange={(event) => setSaved(event.target.checked)} /><span>Tôi đã lưu key ở nơi an toàn</span></label>
     <button className="primary-button" disabled={!saved} onClick={() => onReady(result.account)}>Vào hệ thống <Check size={18}/></button>
   </AuthCard>;
-  return <AuthCard icon={<ShieldCheck />} title="Khởi tạo hệ thống" subtitle="Bạn là người đầu tiên. Hệ thống sẽ tạo admin key duy nhất cho bạn.">
-    <form onSubmit={submit} className="space-y-5"><Field label="Tên quản trị viên" value={name} onChange={setName} placeholder="Ví dụ: Minh Anh" autoFocus />{error && <ErrorText text={error}/>}<button className="primary-button" disabled={name.trim().length < 2}>Tạo admin key <KeyRound size={18}/></button></form>
+  return <AuthCard icon={<ShieldCheck />} title={restoreMode ? 'Khôi phục hệ thống' : 'Khởi tạo hệ thống'} subtitle={restoreMode ? 'Dùng file backup mã hóa và admin key đã tạo file đó.' : 'Bạn là người đầu tiên. Hệ thống sẽ tạo admin key duy nhất cho bạn.'}>
+    {restoreMode ? <form onSubmit={restore} className="space-y-5"><Field label="Admin key của backup" value={restoreKey} onChange={setRestoreKey} placeholder="ck_..." secret autoFocus/><label className="block"><span className="field-label">File backup</span><input className="field-input" type="file" accept="application/json" onChange={(event) => setBackupFile(event.target.files?.[0] ?? null)}/></label>{error && <ErrorText text={error}/>}<button className="primary-button" disabled={!restoreKey || !backupFile}>Khôi phục dữ liệu <ShieldCheck size={18}/></button><button type="button" className="small-button w-full" onClick={() => setRestoreMode(false)}>Quay lại tạo admin</button></form> : <><form onSubmit={submit} className="space-y-5"><Field label="Tên quản trị viên" value={name} onChange={setName} placeholder="Ví dụ: Minh Anh" autoFocus />{error && <ErrorText text={error}/>}<button className="primary-button" disabled={name.trim().length < 2}>Tạo admin key <KeyRound size={18}/></button></form><button type="button" className="small-button w-full mt-3" onClick={() => setRestoreMode(true)}>Khôi phục từ backup</button></>}
   </AuthCard>;
 }
 
@@ -53,4 +67,3 @@ function Field({ label, value, onChange, placeholder, secret, autoFocus }: { lab
 }
 
 export function ErrorText({ text }: { text: string }) { return <p className="rounded-xl bg-rose-500/10 px-4 py-3 text-sm text-rose-400">{text}</p>; }
-

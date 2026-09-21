@@ -23,7 +23,11 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://checkin:${POSTGRES_PASSWORD}@postgres:5432/checkin
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: checkin
+      PGUSER: checkin
+      PGPASSWORD: ${POSTGRES_PASSWORD}
       APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN in .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -64,4 +68,3 @@ volumes:
   postgres_data:
   caddy_data:
   caddy_config:
-

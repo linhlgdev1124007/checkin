@@ -13,7 +13,7 @@ export function App({ api = defaultApi }: { api?: Api }) {
   useEffect(() => { void (async () => { try { const status = await api.status(); if (status.state === 'uninitialized') return setStage('setup'); if (status.state === 'locked') return setStage('locked'); try { const session = await api.session(); setAccount(session.account); setStage('app'); } catch { setStage('login'); } } catch { setStage('login'); } })(); }, [api]);
   const ready = (next: Account) => { setAccount(next); setStage('app'); };
   if (stage === 'loading') return <div className="loading"><ShieldCheck className="animate-pulse" size={36}/><span>Đang kiểm tra hệ thống…</span></div>;
-  if (stage === 'setup') return <AuthShell><SetupScreen api={api} onReady={ready}/></AuthShell>;
+  if (stage === 'setup') return <AuthShell><SetupScreen api={api} onReady={ready} onRestored={() => setStage('login')}/></AuthShell>;
   if (stage === 'locked') return <AuthShell><KeyScreen mode="unlock" api={api} onReady={ready}/></AuthShell>;
   if (stage === 'login' || !account) return <AuthShell><KeyScreen mode="login" api={api} onReady={ready}/></AuthShell>;
   const navigate = (next: View) => { setView(next); setMobile(false); };
@@ -21,4 +21,3 @@ export function App({ api = defaultApi }: { api?: Api }) {
 }
 
 function Nav({ active, onClick, icon, children }: { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) { return <button className={active ? 'active' : ''} onClick={onClick}>{icon}<span>{children}</span></button>; }
-

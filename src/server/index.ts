@@ -3,16 +3,14 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { createApp } from './app.js';
 import { CheckinService } from './application/checkin-service.js';
+import { databaseConfig } from './data/database-config.js';
 import { PostgresStateRepository } from './data/state-repository.js';
 import { createTelegramSender, TelegramWorker } from './integrations/telegram-worker.js';
 import { Vault } from './security/vault.js';
 
 const { Pool } = pg;
 const port = Number(process.env.PORT ?? 3000);
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error('DATABASE_URL is required');
-
-const pool = new Pool({ connectionString: databaseUrl, max: 10 });
+const pool = new Pool({ ...databaseConfig(process.env), max: 10 });
 const repository = new PostgresStateRepository(pool);
 await repository.ensureSchema();
 const service = new CheckinService(repository, new Vault());

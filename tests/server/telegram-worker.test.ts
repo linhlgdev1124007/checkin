@@ -33,4 +33,33 @@ describe('TelegramWorker', () => {
     expect(item).toMatchObject({ status: 'pending', attempts: 1, lastError: 'Telegram unavailable' });
     expect(item && Date.parse(item.nextAttemptAt)).toBe(new Date('2026-09-20T00:00:06.000Z').getTime());
   });
+
+  it('retries only the database acknowledgement after Telegram already succeeded', async () => {
+    let sends = 0;
+    let acknowledgements = 0;
+    let offered = false;
+    const service = {
+      takeDueOutbox: async () => offered ? null : (offered = true, { id: 'message-1', text: 'hello' }),
+      finishOutbox: async () => { acknowledgements += 1; if (acknowledgements === 1) throw new Error('database unavailable'); },
+    };
+    const errors: string[] = [];
+    const worker = new TelegramWorker(service, async () => { sends += 1; }, (error) => errors.push(error.message));
+
+    expect(await worker.deliverOnce()).toBe(true);
+    expect(await worker.deliverOnce()).toBe(true);
+    expect(sends).toBe(1);
+    expect(acknowledgements).toBe(2);
+    expect(errors).toEqual(['database unavailable']);
+  });
+
+  it('contains outbox read failures instead of rejecting the worker tick', async () => {
+    const service = {
+      takeDueOutbox: async () => { throw new Error('database unavailable'); },
+      finishOutbox: async () => undefined,
+    };
+    const errors: string[] = [];
+    const worker = new TelegramWorker(service, async () => undefined, (error) => errors.push(error.message));
+    await expect(worker.deliverOnce()).resolves.toBe(false);
+    expect(errors).toEqual(['database unavailable']);
+  });
 });

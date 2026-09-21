@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import argon2 from 'argon2';
 import type { StateRepository } from '../data/state-repository.js';
 import type { AccountRecord, Role, StateDocument } from '../data/state-types.js';
@@ -44,8 +44,10 @@ export class CheckinService {
       role: 'admin',
       active: true,
       profile: encryptJson(dataKey, { name: normalizedName }, `account:${accountId}:v1`),
+      securityTag: '',
       createdAt: now.toISOString(),
     };
+    sealAccountIntegrity(dataKey, account);
     const document: StateDocument = {
       schemaVersion: 1,
       system: {
@@ -57,7 +59,7 @@ export class CheckinService {
       },
       accounts: [account],
       events: [],
-      sessions: [newSession(token, accountId, this.vault.bootId, now)],
+      sessions: [newSession(token, accountId, credential.publicId, this.vault.bootId, now)],
       outbox: [],
     };
     appendEvent(document, dataKey, accountId, accountId, 'ACCOUNT_CREATED', { role: 'admin', name: normalizedName }, now);
@@ -76,10 +78,11 @@ export class CheckinService {
     try {
       const wrappingKey = await deriveKey(key, Buffer.from(document.system.wrapSalt, 'base64url'), 'wrap');
       const dataKey = decryptBuffer(wrappingKey, document.system.wrappedDataKey, 'system:dek:v1');
+      assertAccountIntegrity(dataKey, admin);
       const profile = decryptProfile(dataKey, admin);
       verifyLedger(document, dataKey);
       this.vault.unlock(dataKey);
-      const token = await this.createSession(admin.id);
+      const token = await this.createSession(admin.id, admin.publicId);
       return { token, account: { id: admin.id, role: admin.role, name: profile.name } };
     } catch (error) {
       if (error instanceof Error && error.message === 'INVALID_LEDGER') throw error;
@@ -93,9 +96,11 @@ export class CheckinService {
     if (!parts) throw new Error('INVALID_KEY');
     const document = await this.requireDocument();
     const account = document.accounts.find((candidate) => candidate.publicId === parts.publicId);
-    if (!account || !account.active || !(await verifySecret(account.secretHash, parts.secret))) throw new Error('INVALID_KEY');
+    if (!account) throw new Error('INVALID_KEY');
+    assertAccountIntegrity(dataKey, account);
+    if (!account.active || !(await verifySecret(account.secretHash, parts.secret))) throw new Error('INVALID_KEY');
     const profile = decryptProfile(dataKey, account);
-    const token = await this.createSession(account.id);
+    const token = await this.createSession(account.id, account.publicId);
     return { token, account: { id: account.id, role: account.role, name: profile.name } };
   }
 
@@ -109,8 +114,10 @@ export class CheckinService {
       && Date.parse(candidate.expiresAt) > now,
     );
     if (!session) throw new Error('UNAUTHORIZED');
-    const account = document.accounts.find((candidate) => candidate.id === session.accountId && candidate.active);
+    const account = document.accounts.find((candidate) => candidate.id === session.accountId);
     if (!account) throw new Error('UNAUTHORIZED');
+    assertAccountIntegrity(dataKey, account);
+    if (!account.active || session.credentialPublicId !== account.publicId) throw new Error('UNAUTHORIZED');
     return { id: account.id, role: account.role, name: decryptProfile(dataKey, account).name };
   }
 
@@ -142,8 +149,10 @@ export class CheckinService {
         role: 'member',
         active: true,
         profile: encryptJson(dataKey, { name: normalizedName }, `account:${accountId}:v1`),
+        securityTag: '',
         createdAt: now.toISOString(),
       };
+      sealAccountIntegrity(dataKey, account);
       state.accounts.push(account);
       appendEvent(state, dataKey, accountId, actor.id, 'ACCOUNT_CREATED', { role: 'member', name: normalizedName }, now);
       return { key: credential.key, account: { id: accountId, role: 'member' as const, name: normalizedName, active: true } };
@@ -154,7 +163,7 @@ export class CheckinService {
     requireAdmin(actor);
     const dataKey = this.vault.requireKey();
     await this.repository.mutate((state) => {
-      const account = requireMember(state, accountId);
+      const account = requireMember(state, dataKey, accountId);
       const previous = decryptProfile(dataKey, account);
       const name = update.name === undefined ? previous.name : validateName(update.name);
       if (update.name !== undefined) account.profile = encryptJson(dataKey, { name }, `account:${account.id}:v1`);
@@ -162,6 +171,7 @@ export class CheckinService {
         account.active = update.active;
         if (!update.active) state.sessions = state.sessions.filter((session) => session.accountId !== account.id);
       }
+      sealAccountIntegrity(dataKey, account);
       appendEvent(state, dataKey, account.id, actor.id, 'ACCOUNT_UPDATED', { name, active: account.active }, new Date());
     });
   }
@@ -172,9 +182,10 @@ export class CheckinService {
     const credential = generateLoginKey();
     const secretHash = await hashSecret(credential.secret);
     await this.repository.mutate((state) => {
-      const account = requireMember(state, accountId);
+      const account = requireMember(state, dataKey, accountId);
       account.publicId = credential.publicId;
       account.secretHash = secretHash;
+      sealAccountIntegrity(dataKey, account);
       state.sessions = state.sessions.filter((session) => session.accountId !== account.id);
       appendEvent(state, dataKey, account.id, actor.id, 'CREDENTIAL_ROTATED', {}, new Date());
     });
@@ -185,13 +196,10 @@ export class CheckinService {
     requireAdmin(actor);
     const key = this.vault.requireKey();
     const state = await this.requireDocument();
-    return state.accounts.map((account) => ({
-      id: account.id,
-      role: account.role,
-      name: decryptProfile(key, account).name,
-      active: account.active,
-      createdAt: account.createdAt,
-    }));
+    return state.accounts.map((account) => {
+      assertAccountIntegrity(key, account);
+      return { id: account.id, role: account.role, name: decryptProfile(key, account).name, active: account.active, createdAt: account.createdAt };
+    });
   }
 
   async checkIn(actor: Actor, now = new Date()): Promise<{ sessionId: string }> {
@@ -207,6 +215,7 @@ export class CheckinService {
     return this.repository.mutate((state) => {
       const account = state.accounts.find((candidate) => candidate.id === actor.id && candidate.active);
       if (!account) throw new Error('ACCOUNT_DISABLED');
+      assertAccountIntegrity(key, account);
       const before = attendanceProjection(state, key, actor.id);
       if (type === 'CHECKED_IN' && before.openSession) throw new Error('ALREADY_CHECKED_IN');
       if (type === 'CHECKED_OUT' && !before.openSession) throw new Error('NOT_CHECKED_IN');
@@ -249,6 +258,7 @@ export class CheckinService {
     const key = this.vault.requireKey();
     const state = await this.requireDocument();
     const members = state.accounts.filter((account) => account.active).map((account) => {
+      assertAccountIntegrity(key, account);
       const projection = attendanceProjection(state, key, account.id);
       return {
         id: account.id,
@@ -321,24 +331,27 @@ export class CheckinService {
   async takeDueOutbox(now = new Date()): Promise<{ id: string; text: string } | null> {
     if (!this.vault.unlocked) return null;
     const key = this.vault.requireKey();
-    const state = await this.requireDocument();
-    const item = state.outbox.find((candidate) => candidate.status === 'pending' && Date.parse(candidate.nextAttemptAt) <= now.getTime());
-    if (!item) return null;
-    return { id: item.id, text: decryptJson<{ text: string }>(key, item.message, `outbox:${item.id}:v1`).text };
+    return this.repository.mutate((state) => {
+      const item = state.outbox.find((candidate) => candidate.status === 'pending' && Date.parse(candidate.nextAttemptAt) <= now.getTime());
+      if (!item) return null;
+      item.status = 'sending';
+      item.attempts += 1;
+      return { id: item.id, text: decryptJson<{ text: string }>(key, item.message, `outbox:${item.id}:v1`).text };
+    });
   }
 
   async finishOutbox(id: string, error: string | null, now = new Date()): Promise<void> {
     await this.repository.mutate((state) => {
       const item = state.outbox.find((candidate) => candidate.id === id);
       if (!item || item.status === 'sent') return;
-      item.attempts += 1;
       if (!error) {
         item.status = 'sent';
         item.sentAt = now.toISOString();
         item.lastError = null;
       } else {
+        item.status = 'pending';
         item.lastError = error.slice(0, 500);
-        const delay = Math.min(3_600_000, 5_000 * 2 ** Math.min(item.attempts - 1, 10));
+        const delay = Math.min(3_600_000, 5_000 * 2 ** Math.min(Math.max(0, item.attempts - 1), 10));
         item.nextAttemptAt = new Date(now.getTime() + delay).toISOString();
       }
     });
@@ -347,19 +360,23 @@ export class CheckinService {
   async retryOutbox(actor: Actor, id: string): Promise<void> {
     requireAdmin(actor);
     await this.repository.mutate((state) => {
-      const item = state.outbox.find((candidate) => candidate.id === id && candidate.status === 'pending');
+      const item = state.outbox.find((candidate) => candidate.id === id && candidate.status !== 'sent');
       if (!item) throw new Error('OUTBOX_NOT_FOUND');
+      item.status = 'pending';
       item.nextAttemptAt = new Date().toISOString();
       item.lastError = null;
     });
   }
 
-  private async createSession(accountId: string): Promise<string> {
+  private async createSession(accountId: string, expectedPublicId: string): Promise<string> {
     const token = randomToken();
     await this.repository.mutate((state) => {
       const now = new Date();
+      const account = state.accounts.find((candidate) => candidate.id === accountId);
+      if (!account || !account.active || account.publicId !== expectedPublicId) throw new Error('INVALID_KEY');
+      assertAccountIntegrity(this.vault.requireKey(), account);
       state.sessions = state.sessions.filter((session) => Date.parse(session.expiresAt) > now.getTime());
-      state.sessions.push(newSession(token, accountId, this.vault.bootId, now));
+      state.sessions.push(newSession(token, accountId, expectedPublicId, this.vault.bootId, now));
     });
     return token;
   }
@@ -376,16 +393,22 @@ export class CheckinService {
     if (!admin || !parts || parts.publicId !== admin.publicId || !(await verifySecret(admin.secretHash, parts.secret))) throw new Error('INVALID_KEY');
     try {
       const wrappingKey = await deriveKey(adminKey, Buffer.from(state.system.wrapSalt, 'base64url'), 'wrap');
-      return decryptBuffer(wrappingKey, state.system.wrappedDataKey, 'system:dek:v1');
+      const dataKey = decryptBuffer(wrappingKey, state.system.wrappedDataKey, 'system:dek:v1');
+      assertAccountIntegrity(dataKey, admin);
+      return dataKey;
     } catch {
       throw new Error('INVALID_KEY');
     }
   }
 
   private async validateState(state: StateDocument, dataKey: Buffer): Promise<void> {
-    if (state.schemaVersion !== 1 || state.accounts.filter((account) => account.role === 'admin').length !== 1) throw new Error('INVALID_BACKUP');
+    if (state.schemaVersion !== 1) throw new Error('INVALID_BACKUP');
     try {
-      for (const account of state.accounts) decryptProfile(dataKey, account);
+      for (const account of state.accounts) {
+        assertAccountIntegrity(dataKey, account);
+        decryptProfile(dataKey, account);
+      }
+      if (state.accounts.filter((account) => account.role === 'admin').length !== 1) throw new Error('INVALID_BACKUP');
       verifyLedger(state, dataKey);
     } catch {
       throw new Error('INVALID_BACKUP');
@@ -421,8 +444,9 @@ function requireAccount(state: StateDocument, accountId: string): AccountRecord 
   return account;
 }
 
-function requireMember(state: StateDocument, accountId: string): AccountRecord {
+function requireMember(state: StateDocument, key: Buffer, accountId: string): AccountRecord {
   const account = requireAccount(state, accountId);
+  assertAccountIntegrity(key, account);
   if (account.role === 'admin') throw new Error('ADMIN_IMMUTABLE');
   return account;
 }
@@ -443,13 +467,31 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('base64url');
 }
 
-function newSession(token: string, accountId: string, bootId: string, now: Date) {
+function newSession(token: string, accountId: string, credentialPublicId: string, bootId: string, now: Date) {
   return {
     tokenHash: hashToken(token),
     accountId,
+    credentialPublicId,
     bootId,
     expiresAt: new Date(now.getTime() + SESSION_MILLISECONDS).toISOString(),
   };
+}
+
+function accountIntegrityTag(key: Buffer, account: AccountRecord): string {
+  return createHmac('sha256', key).update('checkin:account-integrity:v1\0').update(JSON.stringify([
+    account.id, account.publicId, account.secretHash, account.role, account.active,
+    account.profile.nonce, account.profile.ciphertext, account.profile.tag, account.createdAt,
+  ])).digest('base64url');
+}
+
+function sealAccountIntegrity(key: Buffer, account: AccountRecord): void {
+  account.securityTag = accountIntegrityTag(key, account);
+}
+
+function assertAccountIntegrity(key: Buffer, account: AccountRecord): void {
+  const actual = Buffer.from(account.securityTag, 'base64url');
+  const expected = Buffer.from(accountIntegrityTag(key, account), 'base64url');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('INVALID_ACCOUNT_INTEGRITY');
 }
 
 async function decodeBackup(adminKey: string, contents: string): Promise<{ document: StateDocument; dataKey: Buffer }> {
@@ -468,4 +510,3 @@ async function decodeBackup(adminKey: string, contents: string): Promise<{ docum
     throw new Error('INVALID_BACKUP');
   }
 }
-
