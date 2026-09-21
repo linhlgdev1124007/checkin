@@ -14,9 +14,34 @@ export interface Actor {
   name: string;
 }
 
-interface AccountProfile { name: string }
+interface TelegramIdentity { userId: string; username: string | null }
+interface AccountProfile { name: string; telegram?: TelegramIdentity }
 interface AttendanceCorrection { startAt: string; endAt: string | null; reason: string }
 interface BackupEnvelope { format: 'team-checkin-backup'; version: 1; salt: string; sealed: SealedValue }
+
+export interface TelegramTemplates {
+  checkIn: string;
+  checkOut: string;
+  adjustment: string;
+  connected: string;
+}
+
+export interface TelegramCommandInput {
+  updateId: number;
+  userId: string;
+  username: string | null;
+  text: string;
+  now?: Date;
+}
+
+interface TelegramSettings { templates: TelegramTemplates; lastUpdateId: number }
+
+export const DEFAULT_TELEGRAM_TEMPLATES: TelegramTemplates = {
+  checkIn: '{name} • IN • Tổng online: {duration}',
+  checkOut: '{name} • OUT • Tổng online: {duration}',
+  adjustment: '{name} được {operation} {adjustment} • Lý do: {reason} • Tổng mới: {duration}',
+  connected: '{name} đã kết nối Telegram thành công',
+};
 
 const SESSION_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
 
@@ -56,6 +81,7 @@ export class CheckinService {
         wrapSalt: wrapSalt.toString('base64url'),
         wrappedDataKey: encryptBuffer(wrappingKey, dataKey, 'system:dek:v1'),
         tailHash: null,
+        telegramSettings: encryptJson(dataKey, defaultTelegramSettings(), 'system:telegram-settings:v1'),
       },
       accounts: [account],
       events: [],
@@ -142,6 +168,7 @@ export class CheckinService {
     const accountId = randomUUID();
     const secretHash = await hashSecret(credential.secret);
     return this.repository.mutate((state) => {
+      assertUniqueAccountName(state, dataKey, normalizedName);
       const now = new Date();
       const account: AccountRecord = {
         id: accountId,
@@ -167,6 +194,7 @@ export class CheckinService {
       const account = requireMember(state, dataKey, accountId);
       const previous = decryptProfile(dataKey, account);
       const name = update.name === undefined ? previous.name : validateName(update.name);
+      if (update.name !== undefined) assertUniqueAccountName(state, dataKey, name, account.id);
       if (update.name !== undefined) account.profile = encryptJson(dataKey, { name }, `account:${account.id}:v1`);
       if (update.active !== undefined) {
         account.active = update.active;
@@ -193,13 +221,54 @@ export class CheckinService {
     return { key: credential.key };
   }
 
-  async listAccounts(actor: Actor): Promise<Array<Actor & { active: boolean; createdAt: string }>> {
+  async listAccounts(actor: Actor): Promise<Array<Actor & { active: boolean; createdAt: string; telegramLinked: boolean; telegramUsername: string | null }>> {
     requireAdmin(actor);
     const key = this.vault.requireKey();
     const state = await this.requireDocument();
     return state.accounts.map((account) => {
       assertAccountIntegrity(key, account);
-      return { id: account.id, role: account.role, name: decryptProfile(key, account).name, active: account.active, createdAt: account.createdAt };
+      const profile = decryptProfile(key, account);
+      return {
+        id: account.id,
+        role: account.role,
+        name: profile.name,
+        active: account.active,
+        createdAt: account.createdAt,
+        telegramLinked: profile.telegram !== undefined,
+        telegramUsername: profile.telegram?.username ?? null,
+      };
+    });
+  }
+
+  async disconnectTelegram(actor: Actor, accountId: string): Promise<void> {
+    requireAdmin(actor);
+    const key = this.vault.requireKey();
+    await this.repository.mutate((state) => {
+      const account = requireMember(state, key, accountId);
+      const profile = decryptProfile(key, account);
+      if (!profile.telegram) return;
+      delete profile.telegram;
+      account.profile = encryptJson(key, profile, `account:${account.id}:v1`);
+      sealAccountIntegrity(key, account);
+      appendEvent(state, key, account.id, actor.id, 'TELEGRAM_DISCONNECTED', {}, new Date());
+    });
+  }
+
+  async getTelegramTemplates(actor: Actor): Promise<TelegramTemplates> {
+    requireAdmin(actor);
+    const key = this.vault.requireKey();
+    return structuredClone(readTelegramSettings(await this.requireDocument(), key).templates);
+  }
+
+  async updateTelegramTemplates(actor: Actor, templates: TelegramTemplates): Promise<void> {
+    requireAdmin(actor);
+    validateTelegramTemplates(templates);
+    const key = this.vault.requireKey();
+    await this.repository.mutate((state) => {
+      const settings = readTelegramSettings(state, key);
+      settings.templates = structuredClone(templates);
+      writeTelegramSettings(state, key, settings);
+      appendEvent(state, key, actor.id, actor.id, 'TELEGRAM_TEMPLATES_UPDATED', {}, new Date());
     });
   }
 
@@ -213,32 +282,7 @@ export class CheckinService {
 
   private async changeAttendance(actor: Actor, type: 'CHECKED_IN' | 'CHECKED_OUT', now: Date): Promise<{ sessionId: string }> {
     const key = this.vault.requireKey();
-    return this.repository.mutate((state) => {
-      const account = state.accounts.find((candidate) => candidate.id === actor.id && candidate.active);
-      if (!account) throw new Error('ACCOUNT_DISABLED');
-      assertAccountIntegrity(key, account);
-      const before = attendanceProjection(state, key, actor.id);
-      if (type === 'CHECKED_IN' && before.openSession) throw new Error('ALREADY_CHECKED_IN');
-      if (type === 'CHECKED_OUT' && !before.openSession) throw new Error('NOT_CHECKED_IN');
-      const sessionId = before.openSession?.sessionId ?? randomUUID();
-      const event = appendEvent(state, key, actor.id, actor.id, type, { sessionId, at: now.toISOString() }, now);
-      const after = attendanceProjection(state, key, actor.id);
-      const total = type === 'CHECKED_IN' ? before.completedMilliseconds : after.completedMilliseconds;
-      const profile = decryptProfile(key, account);
-      const message = `${profile.name} • ${type === 'CHECKED_IN' ? 'IN' : 'OUT'} • Tổng online: ${formatDuration(total)}`;
-      const outboxId = randomUUID();
-      state.outbox.push({
-        id: outboxId,
-        eventId: event.id,
-        message: encryptJson(key, { text: message }, `outbox:${outboxId}:v1`),
-        status: 'pending',
-        attempts: 0,
-        nextAttemptAt: now.toISOString(),
-        lastError: null,
-        sentAt: null,
-      });
-      return { sessionId };
-    });
+    return this.repository.mutate((state) => changeAttendanceInState(state, key, actor, type, now));
   }
 
   async correctAttendance(actor: Actor, accountId: string, sessionId: string, correction: AttendanceCorrection, now = new Date()): Promise<void> {
@@ -252,6 +296,47 @@ export class CheckinService {
       requireAccount(state, accountId);
       appendEvent(state, key, accountId, actor.id, 'ATTENDANCE_CORRECTED', { sessionId, ...correction }, now);
       attendanceProjection(state, key, accountId);
+    });
+  }
+
+  async adjustAttendance(actor: Actor, accountId: string, adjustmentMilliseconds: number, reason: string, now = new Date()): Promise<void> {
+    requireAdmin(actor);
+    const normalizedReason = reason.trim();
+    if (!normalizedReason) throw new Error('ADJUSTMENT_REASON_REQUIRED');
+    if (!Number.isSafeInteger(adjustmentMilliseconds) || adjustmentMilliseconds === 0) throw new Error('INVALID_ATTENDANCE_ADJUSTMENT');
+    const key = this.vault.requireKey();
+    await this.repository.mutate((state) => {
+      const account = requireMember(state, key, accountId);
+      const event = appendEvent(state, key, accountId, actor.id, 'ATTENDANCE_ADJUSTED', { adjustmentMilliseconds, reason: normalizedReason }, now);
+      const total = attendanceProjection(state, key, accountId).completedMilliseconds;
+      const profile = decryptProfile(key, account);
+      const settings = readTelegramSettings(state, key);
+      const message = renderTemplate(settings.templates.adjustment, {
+        name: profile.name,
+        operation: adjustmentMilliseconds > 0 ? 'Cộng' : 'Trừ',
+        adjustment: formatDuration(Math.abs(adjustmentMilliseconds)),
+        reason: normalizedReason,
+        duration: formatDuration(total),
+      });
+      queueOutbox(state, key, event.id, message, now);
+    });
+  }
+
+  async handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null }> {
+    const key = this.vault.requireKey();
+    const now = input.now ?? new Date();
+    return this.repository.mutate((state) => {
+      const settings = readTelegramSettings(state, key);
+      if (!Number.isSafeInteger(input.updateId) || input.updateId <= settings.lastUpdateId) return { processed: false, reply: null };
+      let reply: string | null;
+      try {
+        reply = handleTelegramCommandInState(state, key, settings, input, now);
+      } catch (cause) {
+        reply = telegramErrorMessage(cause);
+      }
+      settings.lastUpdateId = input.updateId;
+      writeTelegramSettings(state, key, settings);
+      return { processed: true, reply };
     });
   }
 
@@ -413,6 +498,7 @@ export class CheckinService {
         decryptProfile(dataKey, account);
       }
       if (state.accounts.filter((account) => account.role === 'admin').length !== 1) throw new Error('INVALID_BACKUP');
+      if (state.system.telegramSettings) readTelegramSettings(state, dataKey);
       verifyLedger(state, dataKey);
     } catch {
       throw new Error('INVALID_BACKUP');
@@ -421,11 +507,163 @@ export class CheckinService {
 }
 
 function attendanceProjection(state: StateDocument, key: Buffer, accountId: string) {
-  const attendanceTypes = new Set(['CHECKED_IN', 'CHECKED_OUT', 'ATTENDANCE_CORRECTED']);
+  const attendanceTypes = new Set(['CHECKED_IN', 'CHECKED_OUT', 'ATTENDANCE_CORRECTED', 'ATTENDANCE_ADJUSTED']);
   const events = state.events
     .filter((event) => event.accountId === accountId && attendanceTypes.has(event.type))
     .map((event) => ({ type: event.type, ...decryptEvent<Record<string, unknown>>(key, event) })) as AttendanceEvent[];
   return applyAttendanceEvents(events);
+}
+
+function changeAttendanceInState(
+  state: StateDocument,
+  key: Buffer,
+  actor: Actor,
+  type: 'CHECKED_IN' | 'CHECKED_OUT',
+  now: Date,
+): { sessionId: string } {
+  const account = state.accounts.find((candidate) => candidate.id === actor.id && candidate.active);
+  if (!account) throw new Error('ACCOUNT_DISABLED');
+  assertAccountIntegrity(key, account);
+  const before = attendanceProjection(state, key, actor.id);
+  if (type === 'CHECKED_IN' && before.openSession) throw new Error('ALREADY_CHECKED_IN');
+  if (type === 'CHECKED_OUT' && !before.openSession) throw new Error('NOT_CHECKED_IN');
+  const sessionId = before.openSession?.sessionId ?? randomUUID();
+  const event = appendEvent(state, key, actor.id, actor.id, type, { sessionId, at: now.toISOString() }, now);
+  const after = attendanceProjection(state, key, actor.id);
+  const total = type === 'CHECKED_IN' ? before.completedMilliseconds : after.completedMilliseconds;
+  const profile = decryptProfile(key, account);
+  const templates = readTelegramSettings(state, key).templates;
+  const message = renderTemplate(type === 'CHECKED_IN' ? templates.checkIn : templates.checkOut, {
+    name: profile.name,
+    action: type === 'CHECKED_IN' ? 'IN' : 'OUT',
+    duration: formatDuration(total),
+  });
+  queueOutbox(state, key, event.id, message, now);
+  return { sessionId };
+}
+
+function queueOutbox(state: StateDocument, key: Buffer, eventId: string, text: string, now: Date): void {
+  const id = randomUUID();
+  state.outbox.push({
+    id,
+    eventId,
+    message: encryptJson(key, { text }, `outbox:${id}:v1`),
+    status: 'pending',
+    attempts: 0,
+    nextAttemptAt: now.toISOString(),
+    lastError: null,
+    sentAt: null,
+  });
+}
+
+function defaultTelegramSettings(): TelegramSettings {
+  return { templates: structuredClone(DEFAULT_TELEGRAM_TEMPLATES), lastUpdateId: 0 };
+}
+
+function readTelegramSettings(state: StateDocument, key: Buffer): TelegramSettings {
+  if (!state.system.telegramSettings) return defaultTelegramSettings();
+  const settings = decryptJson<TelegramSettings>(key, state.system.telegramSettings, 'system:telegram-settings:v1');
+  validateTelegramTemplates(settings.templates);
+  if (!Number.isSafeInteger(settings.lastUpdateId) || settings.lastUpdateId < 0) throw new Error('INVALID_TELEGRAM_SETTINGS');
+  return settings;
+}
+
+function writeTelegramSettings(state: StateDocument, key: Buffer, settings: TelegramSettings): void {
+  state.system.telegramSettings = encryptJson(key, settings, 'system:telegram-settings:v1');
+}
+
+function validateTelegramTemplates(templates: TelegramTemplates): void {
+  const allowed: Record<keyof TelegramTemplates, Set<string>> = {
+    checkIn: new Set(['name', 'action', 'duration']),
+    checkOut: new Set(['name', 'action', 'duration']),
+    adjustment: new Set(['name', 'operation', 'adjustment', 'reason', 'duration']),
+    connected: new Set(['name', 'telegram']),
+  };
+  for (const name of Object.keys(allowed) as Array<keyof TelegramTemplates>) {
+    const template = templates?.[name];
+    if (typeof template !== 'string' || template.trim().length === 0 || template.length > 1_000) throw new Error('INVALID_TEMPLATE');
+    const placeholders = [...template.matchAll(/\{([A-Za-z]+)\}/g)].map((match) => match[1]);
+    if (placeholders.some((placeholder) => !allowed[name].has(placeholder))) throw new Error('INVALID_TEMPLATE');
+    if (template.replace(/\{[A-Za-z]+\}/g, '').includes('{') || template.replace(/\{[A-Za-z]+\}/g, '').includes('}')) throw new Error('INVALID_TEMPLATE');
+  }
+}
+
+function renderTemplate(template: string, values: Record<string, string>): string {
+  return template.replace(/\{([A-Za-z]+)\}/g, (_match, name: string) => values[name] ?? '');
+}
+
+function handleTelegramCommandInState(
+  state: StateDocument,
+  key: Buffer,
+  settings: TelegramSettings,
+  input: TelegramCommandInput,
+  now: Date,
+): string | null {
+  const match = /^\/([a-z]+)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(input.text.trim());
+  if (!match) return 'Lệnh không hợp lệ. Dùng /connect Họ tên, /in, /out hoặc /status.';
+  const command = match[1].toLowerCase();
+  const argument = match[2]?.trim() ?? '';
+
+  if (command === 'connect') {
+    if (!argument) return 'Cú pháp: /connect Họ tên';
+    const wantedName = normalizedNameKey(validateName(argument));
+    const matches = state.accounts.filter((account) => {
+      if (account.role !== 'member' || !account.active) return false;
+      assertAccountIntegrity(key, account);
+      return normalizedNameKey(decryptProfile(key, account).name) === wantedName;
+    });
+    if (matches.length === 0) throw new Error('TELEGRAM_ACCOUNT_NOT_FOUND');
+    if (matches.length > 1) throw new Error('TELEGRAM_NAME_AMBIGUOUS');
+    const account = matches[0];
+    const alreadyOwned = state.accounts.find((candidate) => decryptProfile(key, candidate).telegram?.userId === input.userId);
+    if (alreadyOwned && alreadyOwned.id !== account.id) throw new Error('TELEGRAM_USER_ALREADY_LINKED');
+    const profile = decryptProfile(key, account);
+    if (profile.telegram && profile.telegram.userId !== input.userId) throw new Error('TELEGRAM_ACCOUNT_ALREADY_LINKED');
+    if (profile.telegram) return `${profile.name} đã kết nối với Telegram này.`;
+    profile.telegram = { userId: input.userId, username: input.username };
+    account.profile = encryptJson(key, profile, `account:${account.id}:v1`);
+    sealAccountIntegrity(key, account);
+    const event = appendEvent(state, key, account.id, account.id, 'TELEGRAM_CONNECTED', { username: input.username }, now);
+    queueOutbox(state, key, event.id, renderTemplate(settings.templates.connected, {
+      name: profile.name,
+      telegram: input.username ? `@${input.username}` : input.userId,
+    }), now);
+    return null;
+  }
+
+  const linked = state.accounts.find((account) => account.active && decryptProfile(key, account).telegram?.userId === input.userId);
+  if (!linked) throw new Error('TELEGRAM_NOT_LINKED');
+  assertAccountIntegrity(key, linked);
+  const profile = decryptProfile(key, linked);
+  const actor: Actor = { id: linked.id, role: linked.role, name: profile.name };
+  if (command === 'in') {
+    changeAttendanceInState(state, key, actor, 'CHECKED_IN', now);
+    return null;
+  }
+  if (command === 'out') {
+    changeAttendanceInState(state, key, actor, 'CHECKED_OUT', now);
+    return null;
+  }
+  if (command === 'status') {
+    const projection = attendanceProjection(state, key, linked.id);
+    return `${profile.name}: ${projection.openSession ? 'đang online' : 'đang offline'} • Tổng online: ${formatDuration(projection.completedMilliseconds)}`;
+  }
+  return 'Lệnh không hợp lệ. Dùng /connect Họ tên, /in, /out hoặc /status.';
+}
+
+function telegramErrorMessage(cause: unknown): string {
+  const code = cause instanceof Error ? cause.message : 'UNKNOWN';
+  const messages: Record<string, string> = {
+    TELEGRAM_ACCOUNT_NOT_FOUND: 'Không tìm thấy thành viên đang hoạt động có tên này.',
+    TELEGRAM_NAME_AMBIGUOUS: 'Có nhiều thành viên trùng tên. Hãy nhờ admin đổi tên.',
+    TELEGRAM_USER_ALREADY_LINKED: 'Telegram này đã liên kết với một thành viên khác.',
+    TELEGRAM_ACCOUNT_ALREADY_LINKED: 'Thành viên này đã liên kết với Telegram khác.',
+    TELEGRAM_NOT_LINKED: 'Bạn chưa liên kết tài khoản. Dùng /connect Họ tên.',
+    ALREADY_CHECKED_IN: 'Bạn đã check in.',
+    NOT_CHECKED_IN: 'Bạn chưa check in.',
+    ACCOUNT_DISABLED: 'Tài khoản đã bị vô hiệu hóa.',
+  };
+  return messages[code] ?? 'Không thể xử lý lệnh lúc này.';
 }
 
 function decryptProfile(key: Buffer, account: AccountRecord): AccountProfile {
@@ -436,6 +674,20 @@ function validateName(name: string): string {
   const normalized = name.trim().replace(/\s+/g, ' ');
   if (normalized.length < 2 || normalized.length > 80) throw new Error('INVALID_NAME');
   return normalized;
+}
+
+function normalizedNameKey(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi-VN');
+}
+
+function assertUniqueAccountName(state: StateDocument, key: Buffer, name: string, exceptId?: string): void {
+  const wanted = normalizedNameKey(name);
+  const duplicate = state.accounts.some((account) => {
+    if (account.id === exceptId) return false;
+    assertAccountIntegrity(key, account);
+    return normalizedNameKey(decryptProfile(key, account).name) === wanted;
+  });
+  if (duplicate) throw new Error('ACCOUNT_NAME_EXISTS');
 }
 
 function requireAdmin(actor: Actor): void {

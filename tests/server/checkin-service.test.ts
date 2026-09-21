@@ -50,6 +50,16 @@ describe('CheckinService', () => {
     expect((await service.login(rotated.key)).account.id).toBe(member.account.id);
   });
 
+  it('requires unique normalized account names', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn   An');
+    await expect(service.createAccount(actor, '  nguyễn an  ')).rejects.toThrow('ACCOUNT_NAME_EXISTS');
+    const other = await service.createAccount(actor, 'Trần Bình');
+    await expect(service.updateAccount(actor, other.account.id, { name: 'NGUYỄN AN' })).rejects.toThrow('ACCOUNT_NAME_EXISTS');
+    expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)?.name).toBe('Nguyễn An');
+  });
+
   it('invalidates a member session immediately when the account is disabled', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
@@ -125,6 +135,59 @@ describe('CheckinService', () => {
     expect((await repository.read())?.events.filter((event) =>
       event.accountId === member.account.id && ['CHECKED_IN', 'CHECKED_OUT', 'ATTENDANCE_CORRECTED'].includes(event.type),
     )).toHaveLength(3);
+  });
+
+  it('adds and subtracts audited time and queues the configured announcement', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const memberActor = await service.authenticate((await service.login(member.key)).token);
+    await service.checkIn(memberActor, new Date('2026-09-20T00:00:00.000Z'));
+    await service.checkOut(memberActor, new Date('2026-09-20T01:00:00.000Z'));
+    await repository.mutate((state) => { state.outbox = []; });
+
+    const templates = await service.getTelegramTemplates(actor);
+    await service.updateTelegramTemplates(actor, {
+      ...templates,
+      adjustment: '{name}: {operation} {adjustment}; {reason}; tổng {duration}',
+    });
+    await service.adjustAttendance(actor, member.account.id, 1_800_000, 'Bổ sung họp', new Date('2026-09-21T00:00:00.000Z'));
+
+    expect((await service.dashboard(actor)).members.find((row) => row.id === member.account.id)?.completedMilliseconds).toBe(5_400_000);
+    expect((await service.audit(actor)).find((event) => event.type === 'ATTENDANCE_ADJUSTED')?.payload).toMatchObject({
+      adjustmentMilliseconds: 1_800_000,
+      reason: 'Bổ sung họp',
+    });
+    expect((await service.takeDueOutbox(new Date('2026-09-21T00:00:01.000Z')))?.text).toBe('Nguyễn An: Cộng 0 giờ 30 phút; Bổ sung họp; tổng 1 giờ 30 phút');
+
+    await expect(service.adjustAttendance(actor, member.account.id, -7_200_000, 'Trừ quá mức')).rejects.toThrow('NEGATIVE_ATTENDANCE_TOTAL');
+    expect((await service.audit(actor)).filter((event) => event.type === 'ATTENDANCE_ADJUSTED')).toHaveLength(1);
+  });
+
+  it('validates Telegram template placeholders', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const templates = await service.getTelegramTemplates(actor);
+    await expect(service.updateTelegramTemplates(actor, { ...templates, checkIn: '{name} {unknown}' })).rejects.toThrow('INVALID_TEMPLATE');
+    expect(await service.getTelegramTemplates(actor)).toEqual(templates);
+  });
+
+  it('connects Telegram once and processes each command update at most once', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+
+    expect(await service.handleTelegramUpdate({ updateId: 10, userId: '123456', username: 'nguyenan', text: '/connect   nguyễn an' })).toMatchObject({ processed: true });
+    expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)).toMatchObject({ telegramLinked: true, telegramUsername: 'nguyenan' });
+    expect(JSON.stringify(await repository.read())).not.toContain('123456');
+
+    expect(await service.handleTelegramUpdate({ updateId: 11, userId: '123456', username: 'nguyenan', text: '/in' })).toMatchObject({ processed: true });
+    expect((await service.dashboard(actor)).members.find((row) => row.id === member.account.id)?.isOnline).toBe(true);
+    expect(await service.handleTelegramUpdate({ updateId: 11, userId: '123456', username: 'nguyenan', text: '/in' })).toEqual({ processed: false, reply: null });
+
+    await service.disconnectTelegram(actor, member.account.id);
+    expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)?.telegramLinked).toBe(false);
+    expect((await service.handleTelegramUpdate({ updateId: 12, userId: '123456', username: 'nguyenan', text: '/status' })).reply).toContain('/connect');
   });
 
   it('allows checkout after an administrator reopens a completed session', async () => {

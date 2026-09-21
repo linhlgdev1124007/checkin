@@ -52,6 +52,7 @@ export interface StateDocument {
     wrapSalt: string;
     wrappedDataKey: SealedValue;
     tailHash: string | null;
+    telegramSettings?: SealedValue;
   };
   accounts: AccountRecord[];
   events: EventRecord[];
