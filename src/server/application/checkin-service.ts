@@ -69,6 +69,7 @@ export class CheckinService {
   }
 
   async unlock(key: string): Promise<{ token: string; account: Actor }> {
+    key = normalizePresentedKey(key);
     const document = await this.requireDocument();
     const admin = document.accounts.find((account) => account.id === document.system.adminAccountId);
     const parts = parseLoginKey(key);
@@ -288,6 +289,7 @@ export class CheckinService {
 
   async exportBackup(actor: Actor, adminKey: string): Promise<string> {
     requireAdmin(actor);
+    adminKey = normalizePresentedKey(adminKey);
     const state = await this.requireDocument();
     await this.validateAdminKey(state, adminKey);
     const salt = randomBytes(16);
@@ -305,6 +307,7 @@ export class CheckinService {
 
   async importBackup(actor: Actor, adminKey: string, contents: string): Promise<void> {
     requireAdmin(actor);
+    adminKey = normalizePresentedKey(adminKey);
     await this.validateAdminKey(await this.requireDocument(), adminKey);
     const { document, dataKey } = await decodeBackup(adminKey, contents);
     await this.validateState(document, dataKey);
@@ -314,6 +317,7 @@ export class CheckinService {
   }
 
   async restoreIntoEmpty(adminKey: string, contents: string): Promise<void> {
+    adminKey = normalizePresentedKey(adminKey);
     if (await this.repository.read()) throw new Error('ALREADY_INITIALIZED');
     const { document, dataKey } = await decodeBackup(adminKey, contents);
     await this.validateState(document, dataKey);
@@ -509,4 +513,8 @@ async function decodeBackup(adminKey: string, contents: string): Promise<{ docum
   } catch {
     throw new Error('INVALID_BACKUP');
   }
+}
+
+function normalizePresentedKey(key: string): string {
+  return key.trim();
 }

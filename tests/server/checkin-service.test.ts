@@ -34,7 +34,7 @@ describe('CheckinService', () => {
     const restarted = new CheckinService(repository, new Vault('boot-b'));
     expect((await restarted.status()).state).toBe('locked');
     await expect(restarted.unlock('ck_aaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).rejects.toThrow('INVALID_KEY');
-    const session = await restarted.unlock(setup.key);
+    const session = await restarted.unlock(`  ${setup.key}\r\n`);
     expect(session.token).toHaveLength(43);
     expect((await restarted.status()).state).toBe('unlocked');
   });
@@ -162,6 +162,16 @@ describe('CheckinService', () => {
     await restored.restoreIntoEmpty(admin.key, backup);
     expect((await restored.status()).state).toBe('unlocked');
     expect((await cleanRepository.read())?.accounts).toHaveLength(2);
+  });
+
+  it('accepts surrounding whitespace for backup key derivation', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const backup = await service.exportBackup(actor, `\n${admin.key}  `);
+    const cleanRepository = new MemoryStateRepository();
+    const restored = new CheckinService(cleanRepository, new Vault('trimmed-backup'));
+    await restored.restoreIntoEmpty(`  ${admin.key}\t`, backup);
+    expect((await restored.status()).state).toBe('unlocked');
   });
 });
 
