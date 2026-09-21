@@ -74,6 +74,10 @@ export function createApp(service: CheckinService, options: AppOptions = {}) {
     response.status(204).end();
   }));
   app.post('/api/accounts/:id/rotate-key', asyncRoute(async (request, response) => response.json(await service.rotateMemberKey(await actor(request), routeParam(request.params.id)))));
+  app.delete('/api/accounts/:id/telegram', asyncRoute(async (request, response) => {
+    await service.disconnectTelegram(await actor(request), routeParam(request.params.id));
+    response.status(204).end();
+  }));
 
   app.get('/api/dashboard', asyncRoute(async (request, response) => response.json(await service.dashboard(await actor(request)))));
   app.post('/api/attendance/check-in', asyncRoute(async (request, response) => response.status(201).json(await service.checkIn(await actor(request)))));
@@ -82,6 +86,22 @@ export function createApp(service: CheckinService, options: AppOptions = {}) {
     const input = z.object({ startAt: z.string().datetime(), endAt: z.string().datetime().nullable(), reason: z.string().min(1) }).parse(request.body);
     await service.correctAttendance(await actor(request), routeParam(request.params.accountId), routeParam(request.params.sessionId), input);
     response.status(201).json({ ok: true });
+  }));
+  app.post('/api/admin/attendance/:accountId/adjustments', asyncRoute(async (request, response) => {
+    const input = z.object({ adjustmentMilliseconds: z.number().int().safe().refine((value) => value !== 0), reason: z.string().min(1).max(500) }).parse(request.body);
+    await service.adjustAttendance(await actor(request), routeParam(request.params.accountId), input.adjustmentMilliseconds, input.reason);
+    response.status(201).json({ ok: true });
+  }));
+  app.get('/api/admin/telegram/templates', asyncRoute(async (request, response) => response.json({ templates: await service.getTelegramTemplates(await actor(request)) })));
+  app.put('/api/admin/telegram/templates', asyncRoute(async (request, response) => {
+    const templates = z.object({
+      checkIn: z.string().min(1).max(1_000),
+      checkOut: z.string().min(1).max(1_000),
+      adjustment: z.string().min(1).max(1_000),
+      connected: z.string().min(1).max(1_000),
+    }).parse(request.body);
+    await service.updateTelegramTemplates(await actor(request), templates);
+    response.status(204).end();
   }));
   app.get('/api/admin/audit', asyncRoute(async (request, response) => response.json({ events: await service.audit(await actor(request)) })));
   app.get('/api/admin/telegram-outbox', asyncRoute(async (request, response) => response.json({ items: await service.listOutbox(await actor(request)) })));
@@ -126,6 +146,8 @@ function apiError(code: string) {
     SYSTEM_LOCKED: 'Hệ thống đang khóa.', UNAUTHORIZED: 'Phiên đăng nhập không hợp lệ.', FORBIDDEN: 'Bạn không có quyền thực hiện thao tác này.',
     ALREADY_INITIALIZED: 'Hệ thống đã được khởi tạo.', NOT_INITIALIZED: 'Hệ thống chưa được khởi tạo.', ALREADY_CHECKED_IN: 'Bạn đã check in.',
     NOT_CHECKED_IN: 'Bạn chưa check in.', INVALID_BACKUP: 'File backup hoặc key không hợp lệ.',
+    ACCOUNT_NAME_EXISTS: 'Tên thành viên đã tồn tại.', NEGATIVE_ATTENDANCE_TOTAL: 'Không thể trừ khiến tổng thời gian nhỏ hơn 0.',
+    INVALID_TEMPLATE: 'Mẫu tin nhắn chứa biến không hợp lệ.', ADJUSTMENT_REASON_REQUIRED: 'Bạn phải nhập lý do điều chỉnh.',
   };
   return { error: { code, message: messages[code] ?? 'Không thể thực hiện yêu cầu.' } };
 }
@@ -135,7 +157,7 @@ function statusFor(code: string): number {
   if (['INVALID_KEY', 'UNAUTHORIZED'].includes(code)) return 401;
   if (['FORBIDDEN', 'INVALID_ORIGIN'].includes(code)) return 403;
   if (['NOT_FOUND', 'ACCOUNT_NOT_FOUND', 'OUTBOX_NOT_FOUND'].includes(code)) return 404;
-  if (['ALREADY_INITIALIZED', 'ALREADY_CHECKED_IN', 'NOT_CHECKED_IN', 'ATTENDANCE_OVERLAP'].includes(code)) return 409;
+  if (['ALREADY_INITIALIZED', 'ALREADY_CHECKED_IN', 'NOT_CHECKED_IN', 'ATTENDANCE_OVERLAP', 'ACCOUNT_NAME_EXISTS', 'NEGATIVE_ATTENDANCE_TOTAL'].includes(code)) return 409;
   if (code === 'SYSTEM_LOCKED') return 423;
   if (code.startsWith('INVALID_') || code.endsWith('_REQUIRED') || code === 'ATTENDANCE_IN_FUTURE') return 422;
   return 500;

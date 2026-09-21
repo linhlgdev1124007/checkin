@@ -1,8 +1,9 @@
 export type Role = 'admin' | 'member';
-export interface Account { id: string; name: string; role: Role; active?: boolean; createdAt?: string }
+export interface Account { id: string; name: string; role: Role; active?: boolean; createdAt?: string; telegramLinked?: boolean; telegramUsername?: string | null }
 export interface DashboardMember { id: string; name: string; completedMilliseconds: number; isOnline: boolean; openSince: string | null }
 export interface AuditEntry { id: string; type: string; accountId: string; actorId: string; createdAt: string; payload: Record<string, unknown> }
 export interface OutboxItem { id: string; status: string; attempts: number; nextAttemptAt: string; lastError: string | null }
+export interface TelegramTemplates { checkIn: string; checkOut: string; adjustment: string; connected: string }
 
 export interface Api {
   status(): Promise<{ state: 'uninitialized' | 'locked' | 'unlocked' }>;
@@ -19,8 +20,12 @@ export interface Api {
   createAccount(name: string): Promise<{ key: string; account: Account }>;
   updateAccount(id: string, update: { name?: string; active?: boolean }): Promise<void>;
   rotateKey(id: string): Promise<{ key: string }>;
+  disconnectTelegram(id: string): Promise<void>;
   audit(): Promise<{ events: AuditEntry[] }>;
   correct(accountId: string, sessionId: string, input: { startAt: string; endAt: string | null; reason: string }): Promise<void>;
+  adjustAttendance(accountId: string, input: { adjustmentMilliseconds: number; reason: string }): Promise<void>;
+  telegramTemplates(): Promise<{ templates: TelegramTemplates }>;
+  updateTelegramTemplates(templates: TelegramTemplates): Promise<void>;
   outbox(): Promise<{ items: OutboxItem[] }>;
   retryOutbox(id: string): Promise<void>;
   exportBackup(key: string): Promise<string>;
@@ -63,8 +68,12 @@ export const api: Api = {
   createAccount: (name) => request('/api/accounts', json('POST', { name })),
   updateAccount: (id, update) => request(`/api/accounts/${id}`, json('PATCH', update)),
   rotateKey: (id) => request(`/api/accounts/${id}/rotate-key`, json('POST')),
+  disconnectTelegram: (id) => request(`/api/accounts/${id}/telegram`, json('DELETE')),
   audit: () => request('/api/admin/audit'),
   correct: (accountId, sessionId, input) => request(`/api/admin/attendance/${accountId}/${sessionId}/corrections`, json('POST', input)),
+  adjustAttendance: (accountId, input) => request(`/api/admin/attendance/${accountId}/adjustments`, json('POST', input)),
+  telegramTemplates: () => request('/api/admin/telegram/templates'),
+  updateTelegramTemplates: (templates) => request('/api/admin/telegram/templates', json('PUT', templates)),
   outbox: () => request('/api/admin/telegram-outbox'),
   retryOutbox: (id) => request(`/api/admin/telegram-outbox/${id}/retry`, json('POST')),
   exportBackup: async (key) => {
@@ -78,4 +87,3 @@ export const api: Api = {
   importBackup: (key, backup) => request('/api/admin/backups/import', json('POST', { key, backup })),
   restore: (key, backup) => request('/api/restore', json('POST', { key, backup })),
 };
-

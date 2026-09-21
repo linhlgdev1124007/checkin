@@ -1,11 +1,26 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Archive, Clipboard, KeyRound, Plus, RefreshCw, Save, ShieldAlert, UserRoundCheck, UserRoundX } from 'lucide-react';
-import type { Account, Api, AuditEntry, OutboxItem } from '../api.js';
+import type { Account, Api, AuditEntry, OutboxItem, TelegramTemplates } from '../api.js';
 import { ErrorText } from './AuthScreens.js';
 
 function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
 }
+
+function formatMilliseconds(milliseconds: number): string {
+  const totalMinutes = Math.floor(milliseconds / 60_000);
+  const days = Math.floor(totalMinutes / 1_440);
+  const hours = Math.floor((totalMinutes % 1_440) / 60);
+  const minutes = totalMinutes % 60;
+  return `${days ? `${days} ngày ` : ''}${hours} giờ ${minutes} phút`;
+}
+
+const DEFAULT_TEMPLATES: TelegramTemplates = {
+  checkIn: '{name} • IN • Tổng online: {duration}',
+  checkOut: '{name} • OUT • Tổng online: {duration}',
+  adjustment: '{name} được {operation} {adjustment} • Lý do: {reason} • Tổng mới: {duration}',
+  connected: '{name} đã kết nối Telegram thành công',
+};
 
 export function MembersPanel({ api }: { api: Api }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -80,13 +95,14 @@ function AccountRow({ item, api, busy, run, reload, reveal }: {
   return <div className="account-row">
     <div className="min-w-0 flex-1">{editing
       ? <input className="field-input" value={name} disabled={busy !== null} onChange={(event) => setName(event.target.value)}/>
-      : <><p className="font-medium truncate">{item.name}</p><p className="text-xs text-slate-500 mt-1">{item.role === 'admin' ? 'Quản trị viên' : item.active ? 'Đang hoạt động' : 'Đã vô hiệu hóa'}</p></>}
+      : <><p className="font-medium truncate">{item.name}</p><p className="text-xs text-slate-500 mt-1">{item.role === 'admin' ? 'Quản trị viên' : item.active ? 'Đang hoạt động' : 'Đã vô hiệu hóa'}</p>{item.role === 'member' && <p className={`text-xs mt-1 ${item.telegramLinked ? 'text-cyan-300' : 'text-slate-600'}`}>{item.telegramLinked ? item.telegramUsername ? `@${item.telegramUsername}` : 'Đã liên kết Telegram' : 'Chưa liên kết Telegram'}</p>}</>}
     </div>
     {item.role === 'member' && <div className="flex flex-wrap gap-2 justify-end">
       {editing
         ? <button className="icon-button" aria-label="Lưu tên" disabled={busy !== null || name.trim().length < 2} onClick={save}><Save size={17}/></button>
         : <button className="small-button" disabled={busy !== null} onClick={() => setEditing(true)}>Đổi tên</button>}
       <button className="small-button" disabled={busy !== null} onClick={rotate}><KeyRound size={15}/> {busy === action('rotate') ? 'Đang cấp…' : 'Cấp key'}</button>
+      {item.telegramLinked && <button className="small-button" disabled={busy !== null} onClick={() => void run(action('telegram'), async () => { await api.disconnectTelegram(item.id); await reload(); })}>Ngắt liên kết Telegram</button>}
       <button className="icon-button" aria-label={item.active ? 'Vô hiệu hóa' : 'Kích hoạt'} disabled={busy !== null} onClick={toggle}>{item.active ? <UserRoundX size={17}/> : <UserRoundCheck size={17}/>}</button>
     </div>}
   </div>;
@@ -112,6 +128,7 @@ export function AuditPanel({ api }: { api: Api }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(true);
   const [form, setForm] = useState({ accountId: '', sessionId: '', startAt: '', endAt: '', reason: '' });
+  const [adjustment, setAdjustment] = useState({ accountId: '', operation: 'add', days: '0', hours: '0', minutes: '0', reason: '' });
   const accountNames = useMemo(() => new Map(accounts.map((account) => [account.id, account.name])), [accounts]);
 
   const load = async () => {
@@ -150,6 +167,27 @@ export function AuditPanel({ api }: { api: Api }) {
     }
   };
 
+  const adjust = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    const absoluteMilliseconds = ((Number(adjustment.days) * 24 + Number(adjustment.hours)) * 60 + Number(adjustment.minutes)) * 60_000;
+    setBusy(true);
+    setError('');
+    try {
+      await api.adjustAttendance(adjustment.accountId, {
+        adjustmentMilliseconds: adjustment.operation === 'subtract' ? -absoluteMilliseconds : absoluteMilliseconds,
+        reason: adjustment.reason,
+      });
+      setAdjustment({ accountId: '', operation: 'add', days: '0', hours: '0', minutes: '0', reason: '' });
+      const audit = await api.audit();
+      setEvents(audit.events);
+    } catch (cause) {
+      setError(errorMessage(cause, 'Không thể cộng hoặc trừ thời gian.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const originalTimes = (event: AuditEntry) => {
     const sessionId = event.payload.sessionId;
     const related = events.filter((candidate) => candidate.payload.sessionId === sessionId);
@@ -159,8 +197,10 @@ export function AuditPanel({ api }: { api: Api }) {
     };
   };
 
+  const adjustmentMilliseconds = ((Number(adjustment.days) * 24 + Number(adjustment.hours)) * 60 + Number(adjustment.minutes)) * 60_000;
+
   return <div className="grid gap-6 xl:grid-cols-[.8fr_1.2fr]">
-    <section className="panel p-5"><p className="eyebrow">Có nhật ký</p><h3 className="mt-1">Điều chỉnh phiên</h3>
+    <div className="space-y-6"><section className="panel p-5"><p className="eyebrow">Có nhật ký</p><h3 className="mt-1">Điều chỉnh phiên</h3>
       <form onSubmit={(event) => void correct(event)} className="mt-5 space-y-3">
         <select className="field-input" value={form.accountId} disabled={busy} onChange={(event) => setForm({ ...form, accountId: event.target.value })}><option value="">Chọn thành viên</option>{accounts.filter((account) => account.role === 'member').map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select>
         <input className="field-input" placeholder="Session ID từ audit" value={form.sessionId} disabled={busy} onChange={(event) => setForm({ ...form, sessionId: event.target.value })}/>
@@ -170,6 +210,19 @@ export function AuditPanel({ api }: { api: Api }) {
         {error && <ErrorText text={error}/>}<button className="secondary-button w-full" disabled={busy || !form.accountId || !form.sessionId || !form.startAt || !form.reason}><Save size={17}/> {busy ? 'Đang xử lý…' : 'Lưu điều chỉnh'}</button>
       </form>
     </section>
+    <section className="panel p-5"><p className="eyebrow">Tổng thời gian</p><h3 className="mt-1">Cộng / trừ thời gian</h3>
+      <form onSubmit={(event) => void adjust(event)} className="mt-5 space-y-3">
+        <label className="field-label">Thành viên điều chỉnh<select className="field-input mt-1" value={adjustment.accountId} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, accountId: event.target.value })}><option value="">Chọn thành viên</option>{accounts.filter((account) => account.role === 'member').map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
+        <label className="field-label">Phép tính<select className="field-input mt-1" value={adjustment.operation} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, operation: event.target.value })}><option value="add">Cộng</option><option value="subtract">Trừ</option></select></label>
+        <div className="grid grid-cols-3 gap-2">
+          <label className="field-label">Ngày<input className="field-input mt-1" type="number" min="0" value={adjustment.days} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, days: event.target.value })}/></label>
+          <label className="field-label">Giờ điều chỉnh<input className="field-input mt-1" type="number" min="0" value={adjustment.hours} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, hours: event.target.value })}/></label>
+          <label className="field-label">Phút<input className="field-input mt-1" type="number" min="0" max="59" value={adjustment.minutes} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, minutes: event.target.value })}/></label>
+        </div>
+        <label className="field-label">Lý do điều chỉnh<textarea className="field-input mt-1" value={adjustment.reason} disabled={busy} onChange={(event) => setAdjustment({ ...adjustment, reason: event.target.value })}/></label>
+        <button className="secondary-button w-full" disabled={busy || !adjustment.accountId || adjustmentMilliseconds <= 0 || !adjustment.reason.trim()}><Save size={17}/> Áp dụng điều chỉnh</button>
+      </form>
+    </section></div>
     <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Chuỗi toàn vẹn</p><h3>Audit log</h3></div><button className="icon-button" aria-label="Làm mới audit log" disabled={busy} onClick={() => void load()}><RefreshCw size={17}/></button></div>
       <div className="max-h-[640px] overflow-auto divide-y divide-slate-800">{events.map((event) => {
         const original = originalTimes(event);
@@ -178,6 +231,7 @@ export function AuditPanel({ api }: { api: Api }) {
           <p className="mt-1 text-xs text-slate-400">Thành viên: {accountNames.get(event.accountId) ?? event.accountId}</p>
           {'sessionId' in event.payload && <p className="mt-1 text-xs text-slate-400 break-all">Session: {String(event.payload.sessionId)}</p>}
           {event.type === 'ATTENDANCE_CORRECTED' && <div className="mt-2 space-y-1 text-xs text-slate-300"><p>{String(event.payload.reason ?? '')}</p><p>Giờ gốc: {String(original.start ?? 'Không có')} → {String(original.end ?? 'Đang mở')}</p><p>Giờ hiệu lực: {String(event.payload.startAt ?? '')} → {String(event.payload.endAt ?? 'Đang mở')}</p></div>}
+          {event.type === 'ATTENDANCE_ADJUSTED' && <div className="mt-2 space-y-1 text-xs text-slate-300"><p>Lý do: {String(event.payload.reason ?? '')}</p><p>Điều chỉnh: {Number(event.payload.adjustmentMilliseconds ?? 0) >= 0 ? '+' : '-'}{formatMilliseconds(Math.abs(Number(event.payload.adjustmentMilliseconds ?? 0)))}</p></div>}
         </div>;
       })}</div>
     </section>
@@ -191,8 +245,13 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>('load');
+  const [templates, setTemplates] = useState<TelegramTemplates | null>(null);
 
-  const load = async () => setOutbox((await api.outbox()).items);
+  const load = async () => {
+    const [queue, settings] = await Promise.all([api.outbox(), api.telegramTemplates()]);
+    setOutbox(queue.items);
+    setTemplates(settings.templates);
+  };
   useEffect(() => {
     void load().catch((cause) => setError(errorMessage(cause, 'Không tải được hàng đợi Telegram.'))).finally(() => setBusy(null));
   }, []);
@@ -231,6 +290,10 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
   };
   const retry = (id: string) => void run(`retry:${id}`, async () => { await api.retryOutbox(id); await load(); });
   const refresh = () => void run('refresh', load);
+  const saveTemplates = () => {
+    if (!templates) return;
+    void run('templates', async () => { await api.updateTelegramTemplates(templates); setMessage('Đã lưu mẫu tin nhắn Telegram.'); });
+  };
   const lock = () => {
     if (!confirm('Khóa hệ thống ngay?')) return;
     void run('lock', async () => { await api.lock(); onLocked(); });
@@ -245,6 +308,19 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
     <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Telegram</p><h3>Hàng đợi gửi tin</h3></div><button className="icon-button" aria-label="Làm mới hàng đợi" disabled={busy !== null} onClick={refresh}><RefreshCw size={17}/></button></div>
       <div className="divide-y divide-slate-800">{outbox.length === 0 && <p className="p-5 text-sm text-slate-500">Chưa có tin nhắn.</p>}{outbox.map((item) => <div className="p-4 flex justify-between gap-4" key={item.id}><div><p className="text-sm">{item.status === 'sent' ? 'Đã gửi' : item.status === 'sending' ? 'Đang gửi' : 'Đang chờ'} · {item.attempts} lần thử</p>{item.lastError && <p className="mt-1 text-xs text-rose-400">{item.lastError}</p>}</div>{item.status !== 'sent' && <button className="small-button" disabled={busy !== null} onClick={() => retry(item.id)}>{busy === `retry:${item.id}` ? 'Đang thử…' : 'Thử lại'}</button>}</div>)}</div>
     </section>
+    <section className="panel p-5 lg:col-span-2"><p className="eyebrow">Nội dung bot</p><h3 className="mt-1">Mẫu tin nhắn Telegram</h3><p className="mt-2 text-sm text-slate-400">Dùng các biến hiển thị bên dưới. Biến khác sẽ bị từ chối.</p>
+      {templates && <div className="mt-5 grid gap-4 md:grid-cols-2">
+        <TemplateField label="Mẫu check-in" hint="{name} {action} {duration}" value={templates.checkIn} disabled={busy !== null} onChange={(value) => setTemplates({ ...templates, checkIn: value })}/>
+        <TemplateField label="Mẫu check-out" hint="{name} {action} {duration}" value={templates.checkOut} disabled={busy !== null} onChange={(value) => setTemplates({ ...templates, checkOut: value })}/>
+        <TemplateField label="Mẫu điều chỉnh" hint="{name} {operation} {adjustment} {reason} {duration}" value={templates.adjustment} disabled={busy !== null} onChange={(value) => setTemplates({ ...templates, adjustment: value })}/>
+        <TemplateField label="Mẫu kết nối" hint="{name} {telegram}" value={templates.connected} disabled={busy !== null} onChange={(value) => setTemplates({ ...templates, connected: value })}/>
+      </div>}
+      <div className="mt-4 flex gap-2"><button className="secondary-button" disabled={busy !== null || !templates} onClick={saveTemplates}>{busy === 'templates' ? 'Đang lưu…' : 'Lưu mẫu tin'}</button><button className="small-button" disabled={busy !== null} onClick={() => setTemplates(structuredClone(DEFAULT_TEMPLATES))}>Khôi phục mặc định</button></div>
+    </section>
     <section className="panel p-5 lg:col-span-2 border-rose-500/20"><ShieldAlert className="text-rose-400"/><h3 className="mt-4">Khóa hệ thống</h3><p className="mt-2 text-sm text-slate-400">Xóa khóa giải mã khỏi RAM và đăng xuất toàn bộ phiên hiện tại.</p><button className="danger-button mt-5" disabled={busy !== null} onClick={lock}>{busy === 'lock' ? 'Đang khóa…' : 'Khóa ngay'}</button></section>
   </div>;
+}
+
+function TemplateField({ label, hint, value, disabled, onChange }: { label: string; hint: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  return <label className="field-label">{label}<textarea aria-label={label} className="field-input mt-1 min-h-24" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}/><span className="mt-1 block text-xs text-slate-500">Biến: {hint}</span></label>;
 }

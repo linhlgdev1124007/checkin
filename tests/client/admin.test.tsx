@@ -29,6 +29,18 @@ describe('admin actions', () => {
     expect(await screen.findByText('ck_new')).toBeInTheDocument();
   });
 
+  it('shows and disconnects a linked Telegram account', async () => {
+    let disconnected = '';
+    const api = {
+      accounts: async () => ({ accounts: [{ id: 'member', name: 'Nguyễn An', role: 'member' as const, active: true, telegramLinked: true, telegramUsername: 'nguyenan' }] }),
+      disconnectTelegram: async (id: string) => { disconnected = id; },
+    } as unknown as Api;
+    render(<MembersPanel api={api}/>);
+    expect(await screen.findByText('@nguyenan')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Ngắt liên kết Telegram' }));
+    await waitFor(() => expect(disconnected).toBe('member'));
+  });
+
   it('shows backup errors and restores the button after failure', async () => {
     const api = {
       outbox: async () => ({ items: [] }),
@@ -42,6 +54,20 @@ describe('admin actions', () => {
     expect(button).toBeDisabled();
     expect(await screen.findByText('Admin key không hợp lệ.')).toBeInTheDocument();
     await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it('edits Telegram message templates', async () => {
+    let saved = '';
+    const api = {
+      outbox: async () => ({ items: [] }),
+      telegramTemplates: async () => ({ templates: { checkIn: '{name} IN {duration}', checkOut: '{name} OUT {duration}', adjustment: '{name} {operation} {adjustment} {reason} {duration}', connected: '{name} connected' } }),
+      updateTelegramTemplates: async (templates: { checkIn: string }) => { saved = templates.checkIn; },
+    } as unknown as Api;
+    render(<OperationsPanel api={api} onLocked={() => undefined}/>);
+    const input = await screen.findByLabelText('Mẫu check-in');
+    fireEvent.change(input, { target: { value: '[{name}] {action}: {duration}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Lưu mẫu tin' }));
+    await waitFor(() => expect(saved).toBe('[{name}] {action}: {duration}'));
   });
 });
 
@@ -74,5 +100,21 @@ describe('audit details', () => {
     expect(screen.getByText(/Giờ gốc: 2026-09-20T00:00:00.000Z → 2026-09-20T02:00:00.000Z/)).toBeInTheDocument();
     expect(screen.getByText(/2026-09-20T00:15:00.000Z/)).toBeInTheDocument();
     expect(screen.getByText(/2026-09-20T01:45:00.000Z/)).toBeInTheDocument();
+  });
+
+  it('submits a signed time adjustment with a reason', async () => {
+    let submitted: unknown;
+    const api = {
+      accounts: async () => ({ accounts: [{ id: 'member', name: 'Nguyễn An', role: 'member' as const, active: true }] }),
+      audit: async () => ({ events: [] }),
+      adjustAttendance: async (accountId: string, input: unknown) => { submitted = { accountId, input }; },
+    } as unknown as Api;
+    render(<AuditPanel api={api}/>);
+    await screen.findByText('Cộng / trừ thời gian');
+    fireEvent.change(screen.getByLabelText('Thành viên điều chỉnh'), { target: { value: 'member' } });
+    fireEvent.change(screen.getByLabelText('Giờ điều chỉnh'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Lý do điều chỉnh'), { target: { value: 'Bổ sung họp' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Áp dụng điều chỉnh' }));
+    await waitFor(() => expect(submitted).toEqual({ accountId: 'member', input: { adjustmentMilliseconds: 3_600_000, reason: 'Bổ sung họp' } }));
   });
 });

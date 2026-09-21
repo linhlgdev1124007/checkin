@@ -39,4 +39,25 @@ describe('Express API', () => {
     expect(response.status).toBe(422);
     expect(response.body.error.code).toBe('INVALID_BACKUP');
   });
+
+  it('exposes admin time adjustment and Telegram template endpoints', async () => {
+    const app = createApp(new CheckinService(new MemoryStateRepository(), new Vault('api-admin')), { secureCookies: false });
+    const agent = request.agent(app);
+    await agent.post('/api/setup').set('Origin', 'http://localhost').send({ name: 'Admin' }).expect(201);
+    const created = await agent.post('/api/accounts').set('Origin', 'http://localhost').send({ name: 'Nguyễn An' }).expect(201);
+
+    await agent.post(`/api/admin/attendance/${created.body.account.id}/adjustments`)
+      .set('Origin', 'http://localhost')
+      .send({ adjustmentMilliseconds: 1_800_000, reason: 'Bổ sung họp' })
+      .expect(201, { ok: true });
+    const templates = await agent.get('/api/admin/telegram/templates').expect(200);
+    await agent.put('/api/admin/telegram/templates')
+      .set('Origin', 'http://localhost')
+      .send({ ...templates.body.templates, checkIn: '{name} đã {action}: {duration}' })
+      .expect(204);
+    await agent.delete(`/api/accounts/${created.body.account.id}/telegram`).set('Origin', 'http://localhost').expect(204);
+
+    const dashboard = await agent.get('/api/dashboard').expect(200);
+    expect(dashboard.body.members.find((member: { id: string }) => member.id === created.body.account.id).completedMilliseconds).toBe(1_800_000);
+  });
 });
