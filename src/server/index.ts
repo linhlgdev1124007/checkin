@@ -5,6 +5,7 @@ import { createApp } from './app.js';
 import { CheckinService } from './application/checkin-service.js';
 import { databaseConfig } from './data/database-config.js';
 import { PostgresStateRepository } from './data/state-repository.js';
+import { createTelegramCommandClient, TelegramCommandWorker } from './integrations/telegram-command-worker.js';
 import { createTelegramSender, TelegramWorker } from './integrations/telegram-worker.js';
 import { Vault } from './security/vault.js';
 
@@ -22,17 +23,21 @@ const app = createApp(service, {
   staticDir,
 });
 
-let worker: TelegramWorker | null = null;
+let deliveryWorker: TelegramWorker | null = null;
+let commandWorker: TelegramCommandWorker | null = null;
 if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
-  worker = new TelegramWorker(service, createTelegramSender(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID));
-  worker.start();
+  deliveryWorker = new TelegramWorker(service, createTelegramSender(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID));
+  commandWorker = new TelegramCommandWorker(service, createTelegramCommandClient(process.env.TELEGRAM_BOT_TOKEN), process.env.TELEGRAM_CHAT_ID);
+  deliveryWorker.start();
+  commandWorker.start();
 } else {
   console.warn('Telegram delivery disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing');
 }
 
 const server = app.listen(port, () => console.log(`Team Check-in listening on port ${port}`));
 const shutdown = () => {
-  worker?.stop();
+  deliveryWorker?.stop();
+  commandWorker?.stop();
   server.close(() => void pool.end().finally(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10_000).unref();
 };
