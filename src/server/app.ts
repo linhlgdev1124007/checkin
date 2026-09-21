@@ -13,14 +13,13 @@ export function createApp(service: CheckinService, options: AppOptions = {}) {
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === 'production';
   app.set('trust proxy', 1);
   app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(['/api/admin/backups/import', '/api/restore'], express.json({ limit: '26mb' }));
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());
   app.use('/api', (request, response, next) => {
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return next();
     const origin = request.get('origin');
-    const allowed = options.expectedOrigin
-      ? origin === options.expectedOrigin
-      : !secureCookies && origin ? ['localhost', '127.0.0.1'].includes(new URL(origin).hostname) : origin === `${request.protocol}://${request.get('host')}`;
+    const allowed = originAllowed(origin, request, options.expectedOrigin, secureCookies);
     if (!allowed) return response.status(403).json(apiError('INVALID_ORIGIN'));
     next();
   });
@@ -144,4 +143,15 @@ function statusFor(code: string): number {
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function originAllowed(origin: string | undefined, request: Request, expectedOrigin: string | undefined, secureCookies: boolean): boolean {
+  if (!origin) return false;
+  if (expectedOrigin) return origin === expectedOrigin;
+  if (secureCookies) return origin === `${request.protocol}://${request.get('host')}`;
+  try {
+    return ['localhost', '127.0.0.1'].includes(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
 }

@@ -22,4 +22,21 @@ describe('Express API', () => {
     expect(response.status).toBe(403);
     expect(response.body.error.code).toBe('INVALID_ORIGIN');
   });
+
+  it('rejects a malformed Origin header as a forbidden request', async () => {
+    const app = createApp(new CheckinService(new MemoryStateRepository(), new Vault('api-boot')), { secureCookies: false });
+    const response = await request(app).post('/api/setup').set('Origin', 'not a url').send({ name: 'Admin' });
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('INVALID_ORIGIN');
+  });
+
+  it('accepts backup request bodies above the normal API limit for validation', async () => {
+    const app = createApp(new CheckinService(new MemoryStateRepository(), new Vault('api-boot')), { secureCookies: false });
+    const response = await request(app)
+      .post('/api/restore')
+      .set('Origin', 'http://localhost')
+      .send({ key: 'invalid', backup: 'x'.repeat(1_100_000) });
+    expect(response.status).toBe(422);
+    expect(response.body.error.code).toBe('INVALID_BACKUP');
+  });
 });

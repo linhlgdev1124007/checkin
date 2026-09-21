@@ -20,6 +20,14 @@ describe('CheckinService', () => {
     expect(JSON.stringify(await repository.read())).not.toContain(first.key);
   });
 
+  it('allows only one winner when initial setup requests race', async () => {
+    const other = new CheckinService(repository, new Vault('boot-race'));
+    const results = await Promise.allSettled([service.setup('Admin A'), other.setup('Admin B')]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect((await repository.read())?.accounts.filter((account) => account.role === 'admin')).toHaveLength(1);
+  });
+
   it('requires the administrator key after a restart', async () => {
     const setup = await service.setup('Admin');
     const restarted = new CheckinService(repository, new Vault('boot-b'));
@@ -39,6 +47,15 @@ describe('CheckinService', () => {
     const rotated = await service.rotateMemberKey(actor, member.account.id);
     await expect(service.login(member.key)).rejects.toThrow('INVALID_KEY');
     expect((await service.login(rotated.key)).account.id).toBe(member.account.id);
+  });
+
+  it('invalidates a member session immediately when the account is disabled', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const login = await service.login(member.key);
+    await service.updateAccount(actor, member.account.id, { active: false });
+    await expect(service.authenticate(login.token)).rejects.toThrow('UNAUTHORIZED');
   });
 
   it('records one open session and atomically queues Telegram messages', async () => {

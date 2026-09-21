@@ -6,7 +6,7 @@
 
 **Architecture:** React/Vite SPA and Express API in one Node process, backed by PostgreSQL. A process-memory vault decrypts application payloads after an administrator unlock. Append-only events drive attendance totals and the Telegram outbox.
 
-**Tech Stack:** TypeScript, React, Tailwind, Express, PostgreSQL, Drizzle schema, Vitest, Docker Compose, Caddy.
+**Tech Stack:** TypeScript, React, Tailwind, Express, PostgreSQL via parameterized `pg` transactions, Vitest, Docker Compose, Caddy.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-checkin-design.md`
 
@@ -24,4 +24,3 @@
 - Disabled or rotated credentials and stale sessions must stop working immediately.
 - Attendance correction must preserve original events and reject negative, future, or overlapping sessions.
 - Telegram failure must never roll back check-in data and must not duplicate a successful delivery.
-
