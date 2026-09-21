@@ -42,6 +42,34 @@ COOKIE_SECURE=false
 
 Check-in/out vẫn thành công khi Telegram lỗi. Hệ thống giữ tin trong outbox, tự thử lại và cho admin thử lại thủ công trong trang Vận hành.
 
+### Chấm công trong nhóm
+
+Bot dùng long polling nên không cần webhook hoặc domain công khai. Sau khi admin mở khóa hệ thống, thành viên liên kết một lần bằng tên tài khoản đã được tạo trên web:
+
+```text
+/connect Nguyễn Văn A
+```
+
+Tên được so khớp không phân biệt chữ hoa/thường và khoảng trắng thừa, nhưng vẫn phân biệt dấu tiếng Việt. Tên thành viên phải duy nhất. Sau khi liên kết, Telegram đó có thể dùng:
+
+```text
+/in
+/out
+/status
+```
+
+Mỗi Telegram chỉ liên kết một thành viên và mỗi thành viên chỉ liên kết một Telegram. Admin có thể ngắt liên kết trong trang Thành viên. Bot chỉ xử lý lệnh gửi trong nhóm có `TELEGRAM_CHAT_ID` đã cấu hình.
+
+### Mẫu thông báo
+
+Admin chỉnh mẫu trong trang Vận hành. Các biến được hỗ trợ:
+
+- Check-in/check-out: `{name}`, `{action}`, `{duration}`.
+- Điều chỉnh: `{name}`, `{operation}`, `{adjustment}`, `{reason}`, `{duration}`.
+- Kết nối: `{name}`, `{telegram}`.
+
+Trang Audit & điều chỉnh cho phép admin cộng hoặc trừ ngày, giờ và phút khỏi tổng thời gian của thành viên. Mọi thay đổi bắt buộc có lý do, được ghi vào integrity ledger và gửi thông báo lên nhóm. Hệ thống từ chối phép trừ làm tổng thời gian nhỏ hơn 0.
+
 Nếu process dừng đúng lúc Telegram đã nhận tin nhưng database chưa kịp xác nhận, item giữ trạng thái `Đang gửi` và không tự gửi lại để tránh tin trùng. Admin đối chiếu nhóm Telegram rồi chọn Thử lại nếu tin thực tế chưa xuất hiện.
 
 ## Backup và cập nhật
