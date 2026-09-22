@@ -235,7 +235,9 @@ describe('CheckinService', () => {
       delete state.system.telegramUpdateId;
       delete state.system.telegramUpdateAt;
     });
-    expect(await service.handleTelegramUpdate({ updateId: 75, userId: '42', username: null, text: '/status' })).toEqual({ processed: false, reply: null });
+    expect(await service.handleTelegramUpdate({ updateId: 75, userId: '42', username: null, text: '/status', now: new Date('2026-09-01T00:00:00.000Z') })).toEqual({ processed: false, reply: null });
+    expect((await service.handleTelegramUpdate({ updateId: 5, userId: '42', username: null, text: '/status', now: new Date('2026-09-09T00:00:00.000Z') })).processed).toBe(true);
+    expect((await service.handleTelegramUpdate({ updateId: 6, userId: '42', username: null, text: '/status', now: new Date('2026-09-09T00:00:01.000Z') })).processed).toBe(true);
   });
 
   it('falls back from an incompatible stored template so an admin can repair it', async () => {

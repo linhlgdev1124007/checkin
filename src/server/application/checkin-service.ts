@@ -600,13 +600,16 @@ function recordTelegramUpdate(state: StateDocument, updateId: number, now: Date)
 function migrateTelegramCursor(state: StateDocument, key: Buffer, now: Date): void {
   if (!state.system.telegramSettings) return;
   const settings = readTelegramSettings(state, key);
-  if (!Number.isSafeInteger(settings.lastUpdateId) || (settings.lastUpdateId ?? 0) < 0) return;
-  const legacyId = settings.lastUpdateId ?? 0;
-  if (state.system.telegramUpdateId === undefined || legacyId > state.system.telegramUpdateId) {
-    state.system.telegramUpdateId = legacyId;
-    const legacyAt = settings.lastUpdateAt && Number.isFinite(Date.parse(settings.lastUpdateAt)) ? settings.lastUpdateAt : now.toISOString();
-    state.system.telegramUpdateAt = legacyAt;
+  const hasLegacyCursor = settings.lastUpdateId !== undefined || settings.lastUpdateAt !== undefined;
+  if (Number.isSafeInteger(settings.lastUpdateId) && (settings.lastUpdateId ?? 0) >= 0) {
+    const legacyId = settings.lastUpdateId ?? 0;
+    if (state.system.telegramUpdateId === undefined || legacyId > state.system.telegramUpdateId) {
+      state.system.telegramUpdateId = legacyId;
+      const legacyAt = settings.lastUpdateAt && Number.isFinite(Date.parse(settings.lastUpdateAt)) ? settings.lastUpdateAt : now.toISOString();
+      state.system.telegramUpdateAt = legacyAt;
+    }
   }
+  if (hasLegacyCursor) writeTelegramSettings(state, key, { templates: settings.templates });
 }
 
 function sanitizeTelegramTemplates(templates: TelegramTemplates): TelegramTemplates {
