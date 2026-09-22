@@ -66,6 +66,10 @@ describe('admin actions', () => {
     render(<OperationsPanel api={api} onLocked={() => undefined}/>);
     const input = await screen.findByLabelText('Mẫu check-in');
     fireEvent.change(input, { target: { value: '[{name}] {action}: {duration}' } });
+    expect(screen.getByText('Xem trước: [Nguyễn An] IN: 2 giờ 30 phút')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Làm mới hàng đợi' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Làm mới hàng đợi' })).toBeEnabled());
+    expect(input).toHaveValue('[{name}] {action}: {duration}');
     fireEvent.click(screen.getByRole('button', { name: 'Lưu mẫu tin' }));
     await waitFor(() => expect(saved).toBe('[{name}] {action}: {duration}'));
   });

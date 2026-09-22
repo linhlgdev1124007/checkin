@@ -247,6 +247,7 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
   const [busy, setBusy] = useState<string | null>('load');
   const [templates, setTemplates] = useState<TelegramTemplates | null>(null);
 
+  const loadOutbox = async () => setOutbox((await api.outbox()).items);
   const load = async () => {
     const [queue, settings] = await Promise.all([api.outbox(), api.telegramTemplates()]);
     setOutbox(queue.items);
@@ -288,8 +289,8 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
       onLocked();
     });
   };
-  const retry = (id: string) => void run(`retry:${id}`, async () => { await api.retryOutbox(id); await load(); });
-  const refresh = () => void run('refresh', load);
+  const retry = (id: string) => void run(`retry:${id}`, async () => { await api.retryOutbox(id); await loadOutbox(); });
+  const refresh = () => void run('refresh', loadOutbox);
   const saveTemplates = () => {
     if (!templates) return;
     void run('templates', async () => { await api.updateTelegramTemplates(templates); setMessage('Đã lưu mẫu tin nhắn Telegram.'); });
@@ -322,5 +323,13 @@ export function OperationsPanel({ api, onLocked }: { api: Api; onLocked: () => v
 }
 
 function TemplateField({ label, hint, value, disabled, onChange }: { label: string; hint: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
-  return <label className="field-label">{label}<textarea aria-label={label} className="field-input mt-1 min-h-24" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}/><span className="mt-1 block text-xs text-slate-500">Biến: {hint}</span></label>;
+  return <label className="field-label">{label}<textarea aria-label={label} className="field-input mt-1 min-h-24" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}/><span className="mt-1 block text-xs text-slate-500">Biến: {hint}</span><span className="mt-2 block rounded-lg bg-slate-950/60 p-2 text-xs text-slate-300">Xem trước: {previewTemplate(value)}</span></label>;
+}
+
+function previewTemplate(template: string): string {
+  const samples: Record<string, string> = {
+    name: 'Nguyễn An', action: 'IN', duration: '2 giờ 30 phút', operation: 'Cộng',
+    adjustment: '0 giờ 30 phút', reason: 'Bổ sung họp', telegram: '@nguyenan',
+  };
+  return template.replace(/\{([A-Za-z]+)\}/g, (_match, name: string) => samples[name] ?? `{${name}}`);
 }

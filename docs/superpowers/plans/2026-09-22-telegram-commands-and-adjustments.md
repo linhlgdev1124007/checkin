@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Preserve compatibility with existing schema-version-1 state and encrypted backups.
-- Store Telegram identities, templates, and cursor encrypted with the existing data key.
+- Store Telegram identities and templates encrypted with the existing data key; persist the non-secret update cursor while locked to prevent replay.
 - Require unique normalized member names and never let an adjustment reduce completed total below zero.
 - Process inbound updates only from the configured Telegram group and at most once.
 

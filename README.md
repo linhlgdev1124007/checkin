@@ -46,8 +46,24 @@ Check-in/out vẫn thành công khi Telegram lỗi. Hệ thống giữ tin trong
 
 Bot dùng long polling nên không cần webhook hoặc domain công khai. Sau khi admin mở khóa hệ thống, thành viên liên kết một lần bằng tên tài khoản đã được tạo trên web:
 
+Để bot nhận lệnh ổn định trong nhóm, chọn một trong hai cách:
+
+- Cho bot làm admin của nhóm với quyền gửi tin; hoặc
+- Vào `@BotFather` → `/setprivacy` → chọn bot → `Disable`, sau đó xóa bot khỏi nhóm và thêm lại.
+
+Nếu bot từng dùng webhook, xóa webhook trước khi chạy ứng dụng bằng `https://api.telegram.org/bot<TOKEN>/deleteWebhook`. Telegram không cho dùng webhook và `getUpdates` cùng lúc.
+
 ```text
 /connect Nguyễn Văn A
+```
+
+Khi Privacy Mode vẫn bật, dùng dạng chỉ rõ bot để Telegram chắc chắn chuyển lệnh đúng nơi:
+
+```text
+/connect@B6Teams_bot Nguyễn Văn A
+/in@B6Teams_bot
+/out@B6Teams_bot
+/status@B6Teams_bot
 ```
 
 Tên được so khớp không phân biệt chữ hoa/thường và khoảng trắng thừa, nhưng vẫn phân biệt dấu tiếng Việt. Tên thành viên phải duy nhất. Sau khi liên kết, Telegram đó có thể dùng:

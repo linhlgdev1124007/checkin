@@ -13,7 +13,7 @@ Let administrators customize Telegram notifications and adjust a member's total 
 - Admin can add or subtract days, hours, and minutes from a member's all-time completed total. A non-empty reason is required and subtraction cannot make the total negative.
 - Adjustments are immutable `ATTENDANCE_ADJUSTED` ledger events. They do not rewrite session events.
 - Check-in, check-out, adjustment, and connection notifications use four admin-editable templates with allow-listed placeholders. Invalid templates are rejected. Defaults can be restored.
-- Telegram linkage, template settings, and update cursor are encrypted with the data key. Existing schema-version-1 state remains readable through optional fields and lazy defaults.
+- Telegram linkage and template settings are encrypted with the data key. The non-secret update cursor is stored as operational system metadata so commands rejected while the vault is locked cannot replay after restart. Existing schema-version-1 state remains readable through optional fields and lazy defaults.
 
 ## Components
 
@@ -36,4 +36,3 @@ Let administrators customize Telegram notifications and adjust a member's total 
 - Service tests cover unique names, connect ownership, unlinking, templates, announcements, and idempotent update processing.
 - Worker tests cover parsing, group filtering, cursor progression, and command replies.
 - API and client tests cover the new admin controls.
-

@@ -11,28 +11,37 @@ export interface TelegramUpdate {
 }
 
 export interface TelegramCommandClient {
+  getBotUsername(): Promise<string>;
   getUpdates(offset?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
   sendReply(chatId: string, text: string, messageId?: number): Promise<void>;
 }
 
 interface TelegramCommandService {
   handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null }>;
+  recordRejectedTelegramUpdate(updateId: number, now?: Date): Promise<void>;
 }
 
 export class TelegramCommandWorker {
   private nextOffset: number | undefined;
   private running = false;
   private controller: AbortController | null = null;
+  private botUsername: string | null = null;
+  private lastUpdateAt: Date | null = null;
 
   constructor(
     private readonly service: TelegramCommandService,
     private readonly client: TelegramCommandClient,
     private readonly chatId: string,
     private readonly reportError: (error: Error) => void = (error) => console.error('Telegram command worker:', error.message),
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   async pollOnce(signal?: AbortSignal): Promise<number> {
+    const now = this.clock();
+    if (this.lastUpdateAt && now.getTime() - this.lastUpdateAt.getTime() >= 7 * 24 * 60 * 60 * 1_000) this.nextOffset = undefined;
+    if (!this.botUsername) this.botUsername = (await this.client.getBotUsername()).replace(/^@/, '');
     const updates = (await this.client.getUpdates(this.nextOffset, signal)).sort((left, right) => left.update_id - right.update_id);
+    if (updates.length > 0) this.lastUpdateAt = now;
     let handled = 0;
     for (const update of updates) {
       this.nextOffset = Math.max(this.nextOffset ?? 0, update.update_id + 1);
@@ -40,6 +49,8 @@ export class TelegramCommandWorker {
       const sender = message?.from;
       const text = message?.text?.trim();
       if (!message || !sender || sender.is_bot || !text?.startsWith('/') || String(message.chat.id) !== this.chatId) continue;
+      const addressedBot = /^\/[a-z]+@([A-Za-z0-9_]+)/i.exec(text)?.[1];
+      if (addressedBot && addressedBot.toLowerCase() !== this.botUsername.toLowerCase()) continue;
       handled += 1;
       try {
         const result = await this.service.handleTelegramUpdate({
@@ -54,6 +65,7 @@ export class TelegramCommandWorker {
         const reply = error.message === 'SYSTEM_LOCKED'
           ? 'Hệ thống đang khóa. Admin cần mở khóa trên website trước.'
           : 'Bot chưa thể xử lý lệnh lúc này. Vui lòng thử lại sau.';
+        if (error.message === 'SYSTEM_LOCKED') await this.service.recordRejectedTelegramUpdate(update.update_id, now);
         if (error.message !== 'SYSTEM_LOCKED') this.reportError(error);
         await this.client.sendReply(this.chatId, reply, message.message_id);
       }
@@ -90,6 +102,12 @@ export class TelegramCommandWorker {
 export function createTelegramCommandClient(botToken: string): TelegramCommandClient {
   const endpoint = `https://api.telegram.org/bot${botToken}`;
   return {
+    async getBotUsername() {
+      const response = await fetch(`${endpoint}/getMe`, { signal: AbortSignal.timeout(10_000) });
+      const result = await response.json().catch(() => null) as { ok?: boolean; result?: { username?: string }; description?: string } | null;
+      if (!response.ok || !result?.ok || !result.result?.username) throw new Error(result?.description ?? `Telegram HTTP ${response.status}`);
+      return result.result.username;
+    },
     async getUpdates(offset, signal) {
       const response = await fetch(`${endpoint}/getUpdates`, {
         method: 'POST',

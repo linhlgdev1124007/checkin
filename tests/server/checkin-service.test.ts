@@ -169,6 +169,7 @@ describe('CheckinService', () => {
     const actor = await service.authenticate(admin.token);
     const templates = await service.getTelegramTemplates(actor);
     await expect(service.updateTelegramTemplates(actor, { ...templates, checkIn: '{name} {unknown}' })).rejects.toThrow('INVALID_TEMPLATE');
+    await expect(service.updateTelegramTemplates(actor, { ...templates, adjustment: '{reason}'.repeat(10) })).rejects.toThrow('INVALID_TEMPLATE');
     expect(await service.getTelegramTemplates(actor)).toEqual(templates);
   });
 
@@ -180,6 +181,8 @@ describe('CheckinService', () => {
     expect(await service.handleTelegramUpdate({ updateId: 10, userId: '123456', username: 'nguyenan', text: '/connect   nguyễn an' })).toMatchObject({ processed: true });
     expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)).toMatchObject({ telegramLinked: true, telegramUsername: 'nguyenan' });
     expect(JSON.stringify(await repository.read())).not.toContain('123456');
+    await service.updateAccount(actor, member.account.id, { name: 'Nguyễn An Mới' });
+    expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)).toMatchObject({ telegramLinked: true, telegramUsername: 'nguyenan' });
 
     expect(await service.handleTelegramUpdate({ updateId: 11, userId: '123456', username: 'nguyenan', text: '/in' })).toMatchObject({ processed: true });
     expect((await service.dashboard(actor)).members.find((row) => row.id === member.account.id)?.isOnline).toBe(true);
@@ -188,6 +191,38 @@ describe('CheckinService', () => {
     await service.disconnectTelegram(actor, member.account.id);
     expect((await service.listAccounts(actor)).find((account) => account.id === member.account.id)?.telegramLinked).toBe(false);
     expect((await service.handleTelegramUpdate({ updateId: 12, userId: '123456', username: 'nguyenan', text: '/status' })).reply).toContain('/connect');
+  });
+
+  it('rolls back a failed Telegram command while remembering the update', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    await service.handleTelegramUpdate({ updateId: 20, userId: '42', username: null, text: '/connect Nguyễn An', now: new Date('2026-09-20T00:00:00.000Z') });
+    await service.handleTelegramUpdate({ updateId: 21, userId: '42', username: null, text: '/in', now: new Date('2026-09-20T01:00:00.000Z') });
+
+    const failed = await service.handleTelegramUpdate({ updateId: 22, userId: '42', username: null, text: '/out', now: new Date('2026-09-20T01:00:00.000Z') });
+    expect(failed.reply).toBe('Không thể xử lý lệnh lúc này.');
+    expect((await service.dashboard(actor)).members.find((row) => row.id === member.account.id)?.isOnline).toBe(true);
+    expect((await service.audit(actor)).filter((event) => event.type === 'CHECKED_OUT')).toHaveLength(0);
+    expect(await service.handleTelegramUpdate({ updateId: 22, userId: '42', username: null, text: '/out' })).toEqual({ processed: false, reply: null });
+  });
+
+  it('accepts a lower Telegram update ID after a week of inactivity', async () => {
+    await service.setup('Admin');
+    const first = await service.handleTelegramUpdate({ updateId: 1_000, userId: '42', username: null, text: '/status', now: new Date('2026-09-01T00:00:00.000Z') });
+    const duplicate = await service.handleTelegramUpdate({ updateId: 999, userId: '42', username: null, text: '/status', now: new Date('2026-09-02T00:00:00.000Z') });
+    const reset = await service.handleTelegramUpdate({ updateId: 5, userId: '42', username: null, text: '/status', now: new Date('2026-09-09T00:00:01.000Z') });
+    expect(first.processed).toBe(true);
+    expect(duplicate.processed).toBe(false);
+    expect(reset.processed).toBe(true);
+  });
+
+  it('durably rejects a Telegram command received while the vault is locked', async () => {
+    const admin = await service.setup('Admin');
+    const locked = new CheckinService(repository, new Vault('locked-command'));
+    await locked.recordRejectedTelegramUpdate(50, new Date('2026-09-20T00:00:00.000Z'));
+    await locked.unlock(admin.key);
+    expect(await locked.handleTelegramUpdate({ updateId: 50, userId: '42', username: null, text: '/status', now: new Date('2026-09-20T00:00:01.000Z') })).toEqual({ processed: false, reply: null });
   });
 
   it('allows checkout after an administrator reopens a completed session', async () => {

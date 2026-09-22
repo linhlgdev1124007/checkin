@@ -34,7 +34,7 @@ export interface TelegramCommandInput {
   now?: Date;
 }
 
-interface TelegramSettings { templates: TelegramTemplates; lastUpdateId: number }
+interface TelegramSettings { templates: TelegramTemplates }
 
 export const DEFAULT_TELEGRAM_TEMPLATES: TelegramTemplates = {
   checkIn: '{name} • IN • Tổng online: {duration}',
@@ -82,6 +82,8 @@ export class CheckinService {
         wrappedDataKey: encryptBuffer(wrappingKey, dataKey, 'system:dek:v1'),
         tailHash: null,
         telegramSettings: encryptJson(dataKey, defaultTelegramSettings(), 'system:telegram-settings:v1'),
+        telegramUpdateId: 0,
+        telegramUpdateAt: now.toISOString(),
       },
       accounts: [account],
       events: [],
@@ -195,7 +197,7 @@ export class CheckinService {
       const previous = decryptProfile(dataKey, account);
       const name = update.name === undefined ? previous.name : validateName(update.name);
       if (update.name !== undefined) assertUniqueAccountName(state, dataKey, name, account.id);
-      if (update.name !== undefined) account.profile = encryptJson(dataKey, { name }, `account:${account.id}:v1`);
+      if (update.name !== undefined) account.profile = encryptJson(dataKey, { ...previous, name }, `account:${account.id}:v1`);
       if (update.active !== undefined) {
         account.active = update.active;
         if (!update.active) state.sessions = state.sessions.filter((session) => session.accountId !== account.id);
@@ -303,6 +305,7 @@ export class CheckinService {
     requireAdmin(actor);
     const normalizedReason = reason.trim();
     if (!normalizedReason) throw new Error('ADJUSTMENT_REASON_REQUIRED');
+    if (normalizedReason.length > 500) throw new Error('INVALID_REASON');
     if (!Number.isSafeInteger(adjustmentMilliseconds) || adjustmentMilliseconds === 0) throw new Error('INVALID_ATTENDANCE_ADJUSTMENT');
     const key = this.vault.requireKey();
     await this.repository.mutate((state) => {
@@ -326,17 +329,24 @@ export class CheckinService {
     const key = this.vault.requireKey();
     const now = input.now ?? new Date();
     return this.repository.mutate((state) => {
-      const settings = readTelegramSettings(state, key);
-      if (!Number.isSafeInteger(input.updateId) || input.updateId <= settings.lastUpdateId) return { processed: false, reply: null };
-      let reply: string | null;
+      if (!shouldProcessTelegramUpdate(state, input.updateId, now)) return { processed: false, reply: null };
+      const commandState = structuredClone(state);
       try {
-        reply = handleTelegramCommandInState(state, key, settings, input, now);
+        const settings = readTelegramSettings(commandState, key);
+        const reply = handleTelegramCommandInState(commandState, key, settings, input, now);
+        recordTelegramUpdate(commandState, input.updateId, now);
+        Object.assign(state, commandState);
+        return { processed: true, reply };
       } catch (cause) {
-        reply = telegramErrorMessage(cause);
+        recordTelegramUpdate(state, input.updateId, now);
+        return { processed: true, reply: telegramErrorMessage(cause) };
       }
-      settings.lastUpdateId = input.updateId;
-      writeTelegramSettings(state, key, settings);
-      return { processed: true, reply };
+    });
+  }
+
+  async recordRejectedTelegramUpdate(updateId: number, now = new Date()): Promise<void> {
+    await this.repository.mutate((state) => {
+      if (shouldProcessTelegramUpdate(state, updateId, now)) recordTelegramUpdate(state, updateId, now);
     });
   }
 
@@ -543,6 +553,7 @@ function changeAttendanceInState(
 }
 
 function queueOutbox(state: StateDocument, key: Buffer, eventId: string, text: string, now: Date): void {
+  if (text.length > 4_096) throw new Error('TELEGRAM_MESSAGE_TOO_LONG');
   const id = randomUUID();
   state.outbox.push({
     id,
@@ -557,19 +568,32 @@ function queueOutbox(state: StateDocument, key: Buffer, eventId: string, text: s
 }
 
 function defaultTelegramSettings(): TelegramSettings {
-  return { templates: structuredClone(DEFAULT_TELEGRAM_TEMPLATES), lastUpdateId: 0 };
+  return { templates: structuredClone(DEFAULT_TELEGRAM_TEMPLATES) };
 }
 
 function readTelegramSettings(state: StateDocument, key: Buffer): TelegramSettings {
   if (!state.system.telegramSettings) return defaultTelegramSettings();
   const settings = decryptJson<TelegramSettings>(key, state.system.telegramSettings, 'system:telegram-settings:v1');
   validateTelegramTemplates(settings.templates);
-  if (!Number.isSafeInteger(settings.lastUpdateId) || settings.lastUpdateId < 0) throw new Error('INVALID_TELEGRAM_SETTINGS');
   return settings;
 }
 
 function writeTelegramSettings(state: StateDocument, key: Buffer, settings: TelegramSettings): void {
   state.system.telegramSettings = encryptJson(key, settings, 'system:telegram-settings:v1');
+}
+
+const TELEGRAM_UPDATE_EPOCH_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
+
+function shouldProcessTelegramUpdate(state: StateDocument, updateId: number, now: Date): boolean {
+  if (!Number.isSafeInteger(updateId) || updateId < 0) return false;
+  const previousId = state.system.telegramUpdateId ?? 0;
+  const previousAt = state.system.telegramUpdateAt ? Date.parse(state.system.telegramUpdateAt) : Number.NaN;
+  return updateId > previousId || !Number.isFinite(previousAt) || now.getTime() - previousAt >= TELEGRAM_UPDATE_EPOCH_MILLISECONDS;
+}
+
+function recordTelegramUpdate(state: StateDocument, updateId: number, now: Date): void {
+  state.system.telegramUpdateId = updateId;
+  state.system.telegramUpdateAt = now.toISOString();
 }
 
 function validateTelegramTemplates(templates: TelegramTemplates): void {
@@ -579,12 +603,22 @@ function validateTelegramTemplates(templates: TelegramTemplates): void {
     adjustment: new Set(['name', 'operation', 'adjustment', 'reason', 'duration']),
     connected: new Set(['name', 'telegram']),
   };
+  const maximumValues = {
+    name: 'N'.repeat(80),
+    action: 'OUT',
+    duration: 'D'.repeat(40),
+    operation: 'Cộng',
+    adjustment: 'A'.repeat(40),
+    reason: 'R'.repeat(500),
+    telegram: 'T'.repeat(33),
+  };
   for (const name of Object.keys(allowed) as Array<keyof TelegramTemplates>) {
     const template = templates?.[name];
     if (typeof template !== 'string' || template.trim().length === 0 || template.length > 1_000) throw new Error('INVALID_TEMPLATE');
     const placeholders = [...template.matchAll(/\{([A-Za-z]+)\}/g)].map((match) => match[1]);
     if (placeholders.some((placeholder) => !allowed[name].has(placeholder))) throw new Error('INVALID_TEMPLATE');
     if (template.replace(/\{[A-Za-z]+\}/g, '').includes('{') || template.replace(/\{[A-Za-z]+\}/g, '').includes('}')) throw new Error('INVALID_TEMPLATE');
+    if (renderTemplate(template, maximumValues).length > 4_096) throw new Error('INVALID_TEMPLATE');
   }
 }
 
