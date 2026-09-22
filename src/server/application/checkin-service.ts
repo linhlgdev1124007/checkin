@@ -34,7 +34,7 @@ export interface TelegramCommandInput {
   now?: Date;
 }
 
-interface TelegramSettings { templates: TelegramTemplates }
+interface TelegramSettings { templates: TelegramTemplates; lastUpdateId?: number; lastUpdateAt?: string }
 
 export const DEFAULT_TELEGRAM_TEMPLATES: TelegramTemplates = {
   checkIn: '{name} • IN • Tổng online: {duration}',
@@ -110,6 +110,7 @@ export class CheckinService {
       assertAccountIntegrity(dataKey, admin);
       const profile = decryptProfile(dataKey, admin);
       verifyLedger(document, dataKey);
+      await this.repository.mutate((state) => migrateTelegramCursor(state, dataKey, new Date()));
       this.vault.unlock(dataKey);
       const token = await this.createSession(admin.id, admin.publicId);
       return { token, account: { id: admin.id, role: admin.role, name: profile.name } };
@@ -329,6 +330,7 @@ export class CheckinService {
     const key = this.vault.requireKey();
     const now = input.now ?? new Date();
     return this.repository.mutate((state) => {
+      migrateTelegramCursor(state, key, now);
       if (!shouldProcessTelegramUpdate(state, input.updateId, now)) return { processed: false, reply: null };
       const commandState = structuredClone(state);
       try {
@@ -574,8 +576,7 @@ function defaultTelegramSettings(): TelegramSettings {
 function readTelegramSettings(state: StateDocument, key: Buffer): TelegramSettings {
   if (!state.system.telegramSettings) return defaultTelegramSettings();
   const settings = decryptJson<TelegramSettings>(key, state.system.telegramSettings, 'system:telegram-settings:v1');
-  validateTelegramTemplates(settings.templates);
-  return settings;
+  return { ...settings, templates: sanitizeTelegramTemplates(settings.templates) };
 }
 
 function writeTelegramSettings(state: StateDocument, key: Buffer, settings: TelegramSettings): void {
@@ -594,6 +595,32 @@ function shouldProcessTelegramUpdate(state: StateDocument, updateId: number, now
 function recordTelegramUpdate(state: StateDocument, updateId: number, now: Date): void {
   state.system.telegramUpdateId = updateId;
   state.system.telegramUpdateAt = now.toISOString();
+}
+
+function migrateTelegramCursor(state: StateDocument, key: Buffer, now: Date): void {
+  if (!state.system.telegramSettings) return;
+  const settings = readTelegramSettings(state, key);
+  if (!Number.isSafeInteger(settings.lastUpdateId) || (settings.lastUpdateId ?? 0) < 0) return;
+  const legacyId = settings.lastUpdateId ?? 0;
+  if (state.system.telegramUpdateId === undefined || legacyId > state.system.telegramUpdateId) {
+    state.system.telegramUpdateId = legacyId;
+    const legacyAt = settings.lastUpdateAt && Number.isFinite(Date.parse(settings.lastUpdateAt)) ? settings.lastUpdateAt : now.toISOString();
+    state.system.telegramUpdateAt = legacyAt;
+  }
+}
+
+function sanitizeTelegramTemplates(templates: TelegramTemplates): TelegramTemplates {
+  const sanitized = structuredClone(DEFAULT_TELEGRAM_TEMPLATES);
+  for (const name of Object.keys(sanitized) as Array<keyof TelegramTemplates>) {
+    const candidate = templates?.[name];
+    try {
+      validateTelegramTemplates({ ...DEFAULT_TELEGRAM_TEMPLATES, [name]: candidate });
+      sanitized[name] = candidate;
+    } catch {
+      sanitized[name] = DEFAULT_TELEGRAM_TEMPLATES[name];
+    }
+  }
+  return sanitized;
 }
 
 function validateTelegramTemplates(templates: TelegramTemplates): void {

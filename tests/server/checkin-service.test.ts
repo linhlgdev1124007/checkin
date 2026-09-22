@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { CheckinService } from '../../src/server/application/checkin-service.js';
+import { CheckinService, DEFAULT_TELEGRAM_TEMPLATES } from '../../src/server/application/checkin-service.js';
 import { MemoryStateRepository, type StateRepository } from '../../src/server/data/state-repository.js';
 import type { StateDocument } from '../../src/server/data/state-types.js';
+import { encryptJson } from '../../src/server/security/crypto.js';
 import { Vault } from '../../src/server/security/vault.js';
 
 describe('CheckinService', () => {
   let repository: MemoryStateRepository;
   let service: CheckinService;
+  let vault: Vault;
 
   beforeEach(() => {
     repository = new MemoryStateRepository();
-    service = new CheckinService(repository, new Vault('boot-a'));
+    vault = new Vault('boot-a');
+    service = new CheckinService(repository, vault);
   });
 
   it('allows exactly one initial administrator and only returns the key at setup', async () => {
@@ -223,6 +226,30 @@ describe('CheckinService', () => {
     await locked.recordRejectedTelegramUpdate(50, new Date('2026-09-20T00:00:00.000Z'));
     await locked.unlock(admin.key);
     expect(await locked.handleTelegramUpdate({ updateId: 50, userId: '42', username: null, text: '/status', now: new Date('2026-09-20T00:00:01.000Z') })).toEqual({ processed: false, reply: null });
+  });
+
+  it('migrates the encrypted Telegram cursor written by the previous release', async () => {
+    await service.setup('Admin');
+    await repository.mutate((state) => {
+      state.system.telegramSettings = encryptJson(vault.requireKey(), { templates: DEFAULT_TELEGRAM_TEMPLATES, lastUpdateId: 75 }, 'system:telegram-settings:v1');
+      delete state.system.telegramUpdateId;
+      delete state.system.telegramUpdateAt;
+    });
+    expect(await service.handleTelegramUpdate({ updateId: 75, userId: '42', username: null, text: '/status' })).toEqual({ processed: false, reply: null });
+  });
+
+  it('falls back from an incompatible stored template so an admin can repair it', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    await repository.mutate((state) => {
+      state.system.telegramSettings = encryptJson(vault.requireKey(), {
+        templates: { ...DEFAULT_TELEGRAM_TEMPLATES, adjustment: '{reason}'.repeat(10) },
+        lastUpdateId: 0,
+      }, 'system:telegram-settings:v1');
+    });
+    expect((await service.getTelegramTemplates(actor)).adjustment).toBe(DEFAULT_TELEGRAM_TEMPLATES.adjustment);
+    await expect(service.updateTelegramTemplates(actor, DEFAULT_TELEGRAM_TEMPLATES)).resolves.toBeUndefined();
+    await expect(service.checkIn(actor)).resolves.toHaveProperty('sessionId');
   });
 
   it('allows checkout after an administrator reopens a completed session', async () => {
