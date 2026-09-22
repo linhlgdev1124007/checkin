@@ -24,7 +24,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "${APP_PORT:-127.0.0.1:3006}:3000"
+      - "${APP_PORT:-127.0.0.1:3006:3000}"
     environment:
       PGHOST: postgres
       PGPORT: 5432
