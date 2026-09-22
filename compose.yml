@@ -18,10 +18,13 @@ services:
     networks: [private]
 
   app:
+    image: ${IMAGE_NAME:-ghcr.io/linhlgdev1124007/checkin:latest}
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    ports:
+      - "${APP_PORT:-127.0.0.1:3006}:3000"
     environment:
       PGHOST: postgres
       PGPORT: 5432
@@ -46,12 +49,14 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    profiles:
+      - caddy
     environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in .env}
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

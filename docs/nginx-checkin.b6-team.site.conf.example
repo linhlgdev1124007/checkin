@@ -1,0 +1,26 @@
+# Cấu hình Nginx mẫu cho checkin.b6-team.site trên VPS
+# Đặt tại /etc/nginx/sites-available/checkin.b6-team.site.conf
+# Kích hoạt: sudo ln -s /etc/nginx/sites-available/checkin.b6-team.site.conf /etc/nginx/sites-enabled/
+# Cấp SSL: sudo certbot --nginx -d checkin.b6-team.site
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name checkin.b6-team.site;
+
+    location / {
+        proxy_pass http://127.0.0.1:3006;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+}
