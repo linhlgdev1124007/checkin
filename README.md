@@ -46,10 +46,10 @@ Check-in/out vẫn thành công khi Telegram lỗi. Hệ thống giữ tin trong
 
 Bot dùng long polling nên không cần webhook hoặc domain công khai. Sau khi admin mở khóa hệ thống, thành viên liên kết một lần bằng tên tài khoản đã được tạo trên web:
 
-Để bot nhận lệnh ổn định trong nhóm, chọn một trong hai cách:
+Để bot nhận lệnh và reaction phê duyệt, **phải cho bot làm admin của nhóm**. Telegram chỉ gửi `message_reaction` cho bot admin; ứng dụng đã đăng ký rõ cả `message` và `message_reaction` trong long polling. Để bot nhận thêm tin nhắn thường khi cần, có thể tắt Privacy Mode:
 
-- Cho bot làm admin của nhóm với quyền gửi tin; hoặc
-- Vào `@BotFather` → `/setprivacy` → chọn bot → `Disable`, sau đó xóa bot khỏi nhóm và thêm lại.
+- Vào `@BotFather` → `/setprivacy` → chọn bot → `Disable`.
+- Xóa bot khỏi nhóm rồi thêm lại và cấp quyền admin.
 
 Nếu bot từng dùng webhook, xóa webhook trước khi chạy ứng dụng bằng `https://api.telegram.org/bot<TOKEN>/deleteWebhook`. Telegram không cho dùng webhook và `getUpdates` cùng lúc.
 
@@ -75,6 +75,17 @@ Tên được so khớp không phân biệt chữ hoa/thường và khoảng tr�
 ```
 
 Mỗi Telegram chỉ liên kết một thành viên và mỗi thành viên chỉ liên kết một Telegram. Admin có thể ngắt liên kết trong trang Thành viên. Bot chỉ xử lý lệnh gửi trong nhóm có `TELEGRAM_CHAT_ID` đã cấu hình.
+
+Tài khoản admin, thành viên yêu cầu và người làm chứng đều liên kết bằng `/connect Tên tài khoản`. Một thành viên có thể yêu cầu check-in hồi tố:
+
+```text
+/in @nguoi_lam_chung 23:00
+/in @nguoi_lam_chung 23:00 23/09/2026
+```
+
+Nếu bỏ ngày, bot dùng ngày hiện tại theo múi giờ Việt Nam. Thời điểm yêu cầu phải nằm trong 12 giờ gần nhất và không được ở tương lai. Yêu cầu hết hạn sau 12 giờ kể từ lúc gửi.
+
+Người được tag phải là thành viên đã liên kết Telegram. Yêu cầu chỉ hoàn tất sau khi đúng người làm chứng và một admin đã liên kết cùng thả ❤️ vào tin nhắn lệnh. Hai người phải khác nhau; người gửi không thể tự làm chứng. Bot reply trực tiếp vào tin nhắn gốc khi tạo yêu cầu, khi một bên duyệt và khi check-in hoàn tất. Bỏ reaction sau khi duyệt không hoàn tác dữ liệu. `/in` không kèm người làm chứng và `/out` tiếp tục xử lý ngay như trước.
 
 ### Mẫu thông báo
 
