@@ -14,16 +14,21 @@ export function Dashboard({ api, account }: { api: Api; account: Account }) {
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(Date.now());
   const historyRequestId = useRef(0);
+  const rangeRef = useRef({ from, to });
+  rangeRef.current = { from, to };
 
   const loadDashboard = async () => {
     try { setMembers((await api.dashboard()).members); setError(''); }
     catch (cause) { setError(errorMessage(cause, 'Không tải được dashboard.')); }
   };
-  const loadHistory = async () => {
+  const loadHistory = async (range = rangeRef.current) => {
     const requestId = ++historyRequestId.current;
     try {
-      const result = await api.attendanceHistory(from, to);
-      if (requestId === historyRequestId.current) { setHistory(result.members); setError(''); }
+      const result = await api.attendanceHistory(range.from, range.to);
+      const currentRange = rangeRef.current;
+      if (requestId === historyRequestId.current && result.from === currentRange.from && result.to === currentRange.to) {
+        setHistory(result.members); setError('');
+      }
     } catch (cause) {
       if (requestId === historyRequestId.current) { setHistory([]); setError(errorMessage(cause, 'Không tải được biểu đồ.')); }
     }

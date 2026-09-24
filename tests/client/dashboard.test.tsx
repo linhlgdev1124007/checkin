@@ -69,4 +69,28 @@ describe('Dashboard attendance charts', () => {
     await act(async () => pending[0]({ from: '2026-09-22', to: '2026-09-24', members: [{ id: 'me', name: 'Nguyễn An', days: [{ date: '2026-09-22', durationMilliseconds: 7_200_000, sessionCount: 1, adjustmentMilliseconds: 0 }] }] }));
     expect(screen.getAllByLabelText('18/09/2026: 1 giờ 0 phút')).toHaveLength(2);
   });
+
+  it('refreshes the current range when check-in completes after a range change', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-24T03:00:00.000Z'));
+    let completeCheckIn!: () => void;
+    const checkIn = new Promise<void>((resolve) => { completeCheckIn = resolve; });
+    const historyCalls: string[][] = [];
+    const api = {
+      dashboard: async () => ({ now: new Date().toISOString(), members: [{ id: 'me', name: 'Nguyễn An', completedMilliseconds: 0, isOnline: false, openSince: null }] }),
+      attendanceHistory: async (from: string, to: string) => {
+        historyCalls.push([from, to]);
+        return { from, to, members: [{ id: 'me', name: 'Nguyễn An', days: [] }] };
+      },
+      checkIn: () => checkIn,
+    } as unknown as Api;
+    render(<Dashboard api={api} account={{ id: 'me', name: 'Nguyễn An', role: 'member' }} />);
+    await screen.findByRole('button', { name: 'Check in' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check in' }));
+    fireEvent.click(screen.getByRole('button', { name: '7 ngày' }));
+    await waitFor(() => expect(historyCalls).toContainEqual(['2026-09-18', '2026-09-24']));
+    await act(async () => completeCheckIn());
+    await waitFor(() => expect(historyCalls.at(-1)).toEqual(['2026-09-18', '2026-09-24']));
+  });
 });
