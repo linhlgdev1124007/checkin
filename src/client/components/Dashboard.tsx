@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clock3, LogIn, LogOut, RefreshCw, Users } from 'lucide-react';
 import type { Account, Api, AttendanceHistoryDay, AttendanceHistoryMember, DashboardMember } from '../api.js';
 import { ErrorText } from './AuthScreens.js';
@@ -13,14 +13,20 @@ export function Dashboard({ api, account }: { api: Api; account: Account }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(Date.now());
+  const historyRequestId = useRef(0);
 
   const loadDashboard = async () => {
     try { setMembers((await api.dashboard()).members); setError(''); }
     catch (cause) { setError(errorMessage(cause, 'Không tải được dashboard.')); }
   };
   const loadHistory = async () => {
-    try { setHistory((await api.attendanceHistory(from, to)).members); setError(''); }
-    catch (cause) { setError(errorMessage(cause, 'Không tải được biểu đồ.')); }
+    const requestId = ++historyRequestId.current;
+    try {
+      const result = await api.attendanceHistory(from, to);
+      if (requestId === historyRequestId.current) { setHistory(result.members); setError(''); }
+    } catch (cause) {
+      if (requestId === historyRequestId.current) { setHistory([]); setError(errorMessage(cause, 'Không tải được biểu đồ.')); }
+    }
   };
 
   useEffect(() => {
@@ -66,26 +72,30 @@ export function Dashboard({ api, account }: { api: Api; account: Account }) {
 
 function BarChart({ days }: { days: AttendanceHistoryDay[] }) {
   const [hovered, setHovered] = useState<AttendanceHistoryDay | null>(null);
-  const max = Math.max(...days.map((day) => day.durationMilliseconds), 1);
-  return <article className="chart-card"><div className="chart-title"><p>So sánh từng ngày</p><h3>Thời gian online theo ngày</h3></div><div className="bar-scroll"><div className="bar-chart" style={{ minWidth: `${Math.max(300, days.length * 46)}px` }}>{days.map((day) => <button key={day.date} className="bar-item" aria-label={dayLabel(day)} onMouseEnter={() => setHovered(day)} onFocus={() => setHovered(day)} onMouseLeave={() => setHovered(null)} onBlur={() => setHovered(null)}><span className="bar-value">{shortDuration(day.durationMilliseconds)}</span><i style={{ height: `${Math.max(3, day.durationMilliseconds / max * 100)}%` }}/><small>{shortDate(day.date)}</small></button>)}</div></div>{hovered && <ChartTooltip day={hovered}/>}</article>;
+  const max = Math.max(...days.map((day) => Math.abs(day.durationMilliseconds)), 1);
+  return <article className="chart-card"><div className="chart-title"><p>So sánh từng ngày</p><h3>Thời gian online theo ngày</h3></div><div className="bar-scroll"><div className="bar-chart" style={{ minWidth: `${Math.max(300, days.length * 46)}px` }}>{days.map((day) => <button key={day.date} className={`bar-item ${day.durationMilliseconds < 0 ? 'negative' : ''}`} aria-label={dayLabel(day)} onMouseEnter={() => setHovered(day)} onFocus={() => setHovered(day)} onMouseLeave={() => setHovered(null)} onBlur={() => setHovered(null)}><span className="bar-value">{chartDuration(day.durationMilliseconds, true)}</span><i style={{ height: `${Math.max(3, Math.abs(day.durationMilliseconds) / max * 100)}%` }}/><small>{shortDate(day.date)}</small></button>)}</div></div>{hovered && <ChartTooltip day={hovered}/>}</article>;
 }
 
 function LineChart({ days }: { days: AttendanceHistoryDay[] }) {
   const [hovered, setHovered] = useState<AttendanceHistoryDay | null>(null);
   const width = Math.max(600, days.length * 32); const height = 220; const padding = 28;
-  const max = Math.max(...days.map((day) => day.durationMilliseconds), 1);
-  const points = days.map((day, index) => ({ day, x: days.length === 1 ? width / 2 : padding + index * (width - padding * 2) / (days.length - 1), y: height - padding - day.durationMilliseconds / max * (height - padding * 2) }));
-  return <article className="chart-card"><div className="chart-title"><p>Biến động trong kỳ</p><h3>Xu hướng online</h3></div><div className="line-wrap"><svg width={width} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Biểu đồ đường thời gian online"><defs><linearGradient id="line-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#22d3ee" stopOpacity=".28"/><stop offset="1" stopColor="#22d3ee" stopOpacity="0"/></linearGradient></defs>{points.length > 1 && <><path className="line-area" d={`M ${points[0].x} ${height - padding} L ${points.map((point) => `${point.x} ${point.y}`).join(' L ')} L ${points.at(-1)!.x} ${height - padding} Z`}/><polyline className="line-path" points={points.map((point) => `${point.x},${point.y}`).join(' ')}/></>}{points.map(({ day, x, y }) => <g key={day.date}><circle className="line-hit" cx={x} cy={y} r="15" tabIndex={0} aria-label={dayLabel(day)} onMouseEnter={() => setHovered(day)} onFocus={() => setHovered(day)} onMouseLeave={() => setHovered(null)} onBlur={() => setHovered(null)}/><circle className="line-dot" cx={x} cy={y} r="5"/><text x={x} y={height - 7} textAnchor="middle">{shortDate(day.date)}</text></g>)}</svg></div>{hovered && <ChartTooltip day={hovered}/>}</article>;
+  const maximum = Math.max(0, ...days.map((day) => day.durationMilliseconds));
+  const minimum = Math.min(0, ...days.map((day) => day.durationMilliseconds));
+  const range = Math.max(1, maximum - minimum);
+  const yFor = (value: number) => padding + (maximum - value) / range * (height - padding * 2);
+  const baseline = yFor(0);
+  const points = days.map((day, index) => ({ day, x: days.length === 1 ? width / 2 : padding + index * (width - padding * 2) / (days.length - 1), y: yFor(day.durationMilliseconds) }));
+  return <article className="chart-card"><div className="chart-title"><p>Biến động trong kỳ</p><h3>Xu hướng online</h3></div><div className="line-wrap"><svg width={width} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Biểu đồ đường thời gian online"><defs><linearGradient id="line-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#22d3ee" stopOpacity=".28"/><stop offset="1" stopColor="#22d3ee" stopOpacity="0"/></linearGradient></defs><line className="line-zero" x1={padding} x2={width - padding} y1={baseline} y2={baseline}/>{points.length > 1 && <><path className="line-area" d={`M ${points[0].x} ${baseline} L ${points.map((point) => `${point.x} ${point.y}`).join(' L ')} L ${points.at(-1)!.x} ${baseline} Z`}/><polyline className="line-path" points={points.map((point) => `${point.x},${point.y}`).join(' ')}/></>}{points.map(({ day, x, y }) => <g key={day.date}><circle className="line-hit" cx={x} cy={y} r="15" tabIndex={0} aria-label={dayLabel(day)} onMouseEnter={() => setHovered(day)} onFocus={() => setHovered(day)} onMouseLeave={() => setHovered(null)} onBlur={() => setHovered(null)}/><circle className={`line-dot ${day.durationMilliseconds < 0 ? 'negative' : ''}`} cx={x} cy={y} r="5"/><text x={x} y={height - 7} textAnchor="middle">{shortDate(day.date)}</text></g>)}</svg></div>{hovered && <ChartTooltip day={hovered}/>}</article>;
 }
 
-function ChartTooltip({ day }: { day: AttendanceHistoryDay }) { return <div className="chart-tooltip" role="status"><strong>{formatDate(day.date)}</strong><span>{formatDuration(day.durationMilliseconds)}</span><span>{day.sessionCount} phiên làm việc</span><span>Điều chỉnh: {signedDuration(day.adjustmentMilliseconds)}</span></div>; }
+function ChartTooltip({ day }: { day: AttendanceHistoryDay }) { return <div className="chart-tooltip" role="status"><strong>{formatDate(day.date)}</strong><span>{chartDuration(day.durationMilliseconds)}</span><span>{day.sessionCount} phiên làm việc</span><span>Điều chỉnh: {signedDuration(day.adjustmentMilliseconds)}</span></div>; }
 function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) { return <div className="metric"><span>{icon}</span><div><p>{label}</p><strong>{value}</strong></div></div>; }
 export function formatDuration(ms: number) { const minutes = Math.max(0, Math.floor(ms / 60_000)); const days = Math.floor(minutes / 1_440); const hours = Math.floor((minutes % 1_440) / 60); const rest = minutes % 60; return days ? `${days} ngày ${hours} giờ ${rest} phút` : `${hours} giờ ${rest} phút`; }
 function signedDuration(ms: number) { return `${ms >= 0 ? '+' : '−'}${formatDuration(Math.abs(ms))}`; }
-function shortDuration(ms: number) { const hours = ms / 3_600_000; return hours >= 10 ? `${Math.round(hours)}h` : `${hours.toFixed(hours % 1 ? 1 : 0)}h`; }
+function chartDuration(ms: number, short = false) { if (short) { const hours = Math.abs(ms) / 3_600_000; return `${ms < 0 ? '−' : ''}${hours >= 10 ? Math.round(hours) : hours.toFixed(hours % 1 ? 1 : 0)}h`; } return `${ms < 0 ? '−' : ''}${formatDuration(Math.abs(ms))}`; }
 function shortDate(date: string) { const [, month, day] = date.split('-'); return `${day}/${month}`; }
 function formatDate(date: string) { const [year, month, day] = date.split('-'); return `${day}/${month}/${year}`; }
-function dayLabel(day: AttendanceHistoryDay) { return `${formatDate(day.date)}: ${formatDuration(day.durationMilliseconds)}`; }
+function dayLabel(day: AttendanceHistoryDay) { return `${formatDate(day.date)}: ${chartDuration(day.durationMilliseconds)}`; }
 function initials(name: string) { return name.split(' ').slice(-2).map((part) => part[0]).join('').toUpperCase(); }
 function addDays(date: Date, amount: number) { return new Date(date.getTime() + amount * 86_400_000); }
 function vietnamDate(date: Date) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date); }

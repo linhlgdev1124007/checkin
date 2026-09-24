@@ -595,7 +595,7 @@ function attendanceDays(state: StateDocument, key: Buffer, accountId: string, da
     const adjustmentMilliseconds = adjustments.get(date) ?? 0;
     return {
       date,
-      durationMilliseconds: Math.max(0, sessionMilliseconds + adjustmentMilliseconds),
+      durationMilliseconds: sessionMilliseconds + adjustmentMilliseconds,
       sessionCount,
       adjustmentMilliseconds,
     };

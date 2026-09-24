@@ -154,6 +154,21 @@ describe('CheckinService', () => {
     await expect(service.attendanceHistory(actor, '2026-01-01', '2026-04-01')).rejects.toThrow('DATE_RANGE_TOO_LARGE');
   });
 
+  it('preserves a deduction on a day without attendance in history totals', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const memberActor = await service.authenticate((await service.login(member.key)).token);
+    await service.checkIn(memberActor, new Date('2026-09-21T02:00:00.000Z'));
+    await service.checkOut(memberActor, new Date('2026-09-21T10:00:00.000Z'));
+    await service.adjustAttendance(actor, member.account.id, -7_200_000, 'Trừ thời gian', new Date('2026-09-22T02:00:00.000Z'));
+
+    const days = (await service.attendanceHistory(actor, '2026-09-21', '2026-09-22')).members
+      .find((item) => item.id === member.account.id)!.days;
+    expect(days.map((day) => day.durationMilliseconds)).toEqual([28_800_000, -7_200_000]);
+    expect(days.reduce((total, day) => total + day.durationMilliseconds, 0)).toBe(21_600_000);
+  });
+
   it('keeps the original attendance events when an admin corrects a session', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
