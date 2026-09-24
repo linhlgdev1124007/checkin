@@ -36,6 +36,7 @@ export interface TelegramCommandInput {
   username: string | null;
   text: string;
   entities?: TelegramMessageEntity[];
+  sentAt?: Date;
   now?: Date;
 }
 
@@ -269,7 +270,9 @@ export class CheckinService {
     requireAdmin(actor);
     const key = this.vault.requireKey();
     await this.repository.mutate((state) => {
-      const account = requireActiveAccount(state, key, accountId);
+      const account = state.accounts.find((candidate) => candidate.id === accountId);
+      if (!account) throw new Error('ACCOUNT_NOT_FOUND');
+      assertAccountIntegrity(key, account);
       const profile = decryptProfile(key, account);
       if (!profile.telegram) return;
       delete profile.telegram;
@@ -382,7 +385,8 @@ export class CheckinService {
         return { processed: true, reply, replyToMessageId: reply ? input.messageId : null };
       } catch (cause) {
         recordTelegramUpdate(state, input.updateId, now);
-        return { processed: true, reply: telegramErrorMessage(cause), replyToMessageId: input.messageId };
+        queueOutbox(state, key, randomUUID(), telegramErrorMessage(cause), now, input.messageId);
+        return { processed: true, reply: null, replyToMessageId: null };
       }
     });
   }
@@ -489,7 +493,7 @@ export class CheckinService {
     return state.outbox.map(({ id, status, attempts, nextAttemptAt, lastError }) => ({ id, status, attempts, nextAttemptAt, lastError }));
   }
 
-  async takeDueOutbox(now = new Date()): Promise<{ id: string; text: string } | null> {
+  async takeDueOutbox(now = new Date()): Promise<{ id: string; text: string; replyToMessageId?: number } | null> {
     if (!this.vault.unlocked) return null;
     const key = this.vault.requireKey();
     return this.repository.mutate((state) => {
@@ -497,7 +501,8 @@ export class CheckinService {
       if (!item) return null;
       item.status = 'sending';
       item.attempts += 1;
-      return { id: item.id, text: decryptJson<{ text: string }>(key, item.message, `outbox:${item.id}:v1`).text };
+      const payload = decryptJson<{ text: string; replyToMessageId?: number }>(key, item.message, `outbox:${item.id}:v1`);
+      return { id: item.id, ...payload };
     });
   }
 
@@ -668,13 +673,13 @@ function changeAttendanceInState(
   return { sessionId };
 }
 
-function queueOutbox(state: StateDocument, key: Buffer, eventId: string, text: string, now: Date): void {
+function queueOutbox(state: StateDocument, key: Buffer, eventId: string, text: string, now: Date, replyToMessageId?: number): void {
   if (text.length > 4_096) throw new Error('TELEGRAM_MESSAGE_TOO_LONG');
   const id = randomUUID();
   state.outbox.push({
     id,
     eventId,
-    message: encryptJson(key, { text }, `outbox:${id}:v1`),
+    message: encryptJson(key, { text, ...(replyToMessageId === undefined ? {} : { replyToMessageId }) }, `outbox:${id}:v1`),
     status: 'pending',
     attempts: 0,
     nextAttemptAt: now.toISOString(),
@@ -815,7 +820,8 @@ function handleTelegramCommandInState(
   const profile = decryptProfile(key, linked);
   const actor: Actor = { id: linked.id, role: linked.role, name: profile.name };
   if (command === 'in') {
-    const witnessed = parseWitnessedCheckIn({ text: input.text, entities: input.entities ?? [], now });
+    const sentAt = input.sentAt ?? now;
+    const witnessed = parseWitnessedCheckIn({ text: input.text, entities: input.entities ?? [], now: sentAt });
     if (witnessed) {
       if (input.chatId === undefined || input.messageId === undefined) throw new Error('INVALID_WITNESSED_CHECKIN');
       const requests = telegramRequestProjection(state, key);
@@ -823,15 +829,20 @@ function handleTelegramCommandInState(
       const witness = resolveTelegramWitness(state, key, witnessed.witness);
       if (witness.role !== 'member') throw new Error('TELEGRAM_WITNESS_MUST_BE_MEMBER');
       if (witness.id === linked.id) throw new Error('TELEGRAM_SELF_WITNESS');
-      appendEvent(state, key, linked.id, linked.id, 'TELEGRAM_CHECKIN_REQUESTED', {
+      if (now.getTime() > Date.parse(witnessed.expiresAt)) throw new Error('TELEGRAM_CHECKIN_EXPIRED');
+      const witnessTelegramUserId = decryptProfile(key, witness).telegram!.userId;
+      const event = appendEvent(state, key, linked.id, linked.id, 'TELEGRAM_CHECKIN_REQUESTED', {
         chatId: input.chatId,
         messageId: input.messageId,
         requesterAccountId: linked.id,
+        requesterTelegramUserId: input.userId,
         witnessAccountId: witness.id,
+        witnessTelegramUserId,
         requestedAt: witnessed.requestedAt,
         expiresAt: witnessed.expiresAt,
       }, now);
-      return `Đã tạo yêu cầu check-in lúc ${formatVietnamDateTime(witnessed.requestedAt)}. Đang chờ người làm chứng và admin thả ❤️.`;
+      queueOutbox(state, key, event.id, `Đã tạo yêu cầu check-in lúc ${formatVietnamDateTime(witnessed.requestedAt)}. Đang chờ người làm chứng và admin thả ❤️.`, now, input.messageId);
+      return null;
     }
     changeAttendanceInState(state, key, actor, 'CHECKED_IN', now);
     return null;
@@ -859,33 +870,50 @@ function handleTelegramReactionInState(
   const reacting = findLinkedTelegramAccount(state, key, input.userId);
   if (!reacting) return null;
   if (now.getTime() > Date.parse(request.expiresAt)) {
-    appendEvent(state, key, request.requesterAccountId, reacting.id, 'TELEGRAM_CHECKIN_EXPIRED', {
+    const event = appendEvent(state, key, request.requesterAccountId, reacting.id, 'TELEGRAM_CHECKIN_EXPIRED', {
       chatId: input.chatId, messageId: input.messageId,
     }, now);
-    return 'Yêu cầu check-in đã hết hạn.';
+    queueOutbox(state, key, event.id, 'Yêu cầu check-in đã hết hạn.', now, input.messageId);
+    return null;
   }
 
   let approvalType: 'TELEGRAM_CHECKIN_WITNESS_APPROVED' | 'TELEGRAM_CHECKIN_ADMIN_APPROVED' | null = null;
-  if (reacting.id === request.witnessAccountId && !request.witnessApprovedBy) approvalType = 'TELEGRAM_CHECKIN_WITNESS_APPROVED';
+  if (reacting.id === request.witnessAccountId && input.userId === request.witnessTelegramUserId && !request.witnessApprovedBy) approvalType = 'TELEGRAM_CHECKIN_WITNESS_APPROVED';
   else if (reacting.role === 'admin' && reacting.id !== request.witnessAccountId && !request.adminApprovedBy) approvalType = 'TELEGRAM_CHECKIN_ADMIN_APPROVED';
   if (!approvalType) return null;
 
-  appendEvent(state, key, request.requesterAccountId, reacting.id, approvalType, {
-    chatId: input.chatId, messageId: input.messageId, approverAccountId: reacting.id,
+  const approvalEvent = appendEvent(state, key, request.requesterAccountId, reacting.id, approvalType, {
+    chatId: input.chatId, messageId: input.messageId, approverAccountId: reacting.id, approverTelegramUserId: input.userId,
   }, now);
   const afterApproval = telegramRequestProjection(state, key).get(telegramRequestKey(input.chatId, input.messageId))!;
-  if (!afterApproval.witnessApprovedBy) return 'Admin đã duyệt. Đang chờ người làm chứng thả ❤️.';
-  if (!afterApproval.adminApprovedBy) return 'Người làm chứng đã duyệt. Đang chờ admin thả ❤️.';
+  if (!afterApproval.witnessApprovedBy) {
+    queueOutbox(state, key, approvalEvent.id, 'Admin đã duyệt. Đang chờ người làm chứng thả ❤️.', now, input.messageId);
+    return null;
+  }
+  if (!afterApproval.adminApprovedBy) {
+    queueOutbox(state, key, approvalEvent.id, 'Người làm chứng đã duyệt. Đang chờ admin thả ❤️.', now, input.messageId);
+    return null;
+  }
 
-  const requester = requireActiveAccount(state, key, request.requesterAccountId);
+  const requester = requireTelegramIdentity(state, key, request.requesterAccountId, request.requesterTelegramUserId);
+  requireTelegramIdentity(state, key, request.witnessAccountId, request.witnessTelegramUserId, 'member');
+  requireTelegramIdentity(state, key, afterApproval.adminApprovedBy, afterApproval.adminApprovedTelegramUserId!, 'admin');
   const requesterProfile = decryptProfile(key, requester);
   const result = changeAttendanceInState(state, key, {
     id: requester.id, role: requester.role, name: requesterProfile.name,
   }, 'CHECKED_IN', new Date(request.requestedAt));
-  appendEvent(state, key, requester.id, reacting.id, 'TELEGRAM_CHECKIN_COMPLETED', {
+  const completedEvent = appendEvent(state, key, requester.id, reacting.id, 'TELEGRAM_CHECKIN_COMPLETED', {
     chatId: input.chatId, messageId: input.messageId, sessionId: result.sessionId,
   }, now);
-  return `Đã đủ xác nhận. Check-in thành công lúc ${formatVietnamDateTime(request.requestedAt)}.`;
+  queueOutbox(state, key, completedEvent.id, `Đã đủ xác nhận. Check-in thành công lúc ${formatVietnamDateTime(request.requestedAt)}.`, now, input.messageId);
+  return null;
+}
+
+function requireTelegramIdentity(state: StateDocument, key: Buffer, accountId: string, userId: string, role?: 'member' | 'admin'): AccountRecord {
+  const account = requireActiveAccount(state, key, accountId);
+  if (role && account.role !== role) throw new Error('TELEGRAM_APPROVAL_IDENTITY_CHANGED');
+  if (decryptProfile(key, account).telegram?.userId !== userId) throw new Error('TELEGRAM_APPROVAL_IDENTITY_CHANGED');
+  return account;
 }
 
 function telegramRequestProjection(state: StateDocument, key: Buffer) {

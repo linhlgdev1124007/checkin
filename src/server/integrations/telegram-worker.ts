@@ -1,6 +1,6 @@
-export type TelegramSender = (text: string) => Promise<void>;
+export type TelegramSender = (text: string, replyToMessageId?: number) => Promise<void>;
 interface OutboxService {
-  takeDueOutbox(now?: Date): Promise<{ id: string; text: string } | null>;
+  takeDueOutbox(now?: Date): Promise<{ id: string; text: string; replyToMessageId?: number } | null>;
   finishOutbox(id: string, error: string | null, now?: Date): Promise<void>;
 }
 
@@ -27,7 +27,7 @@ export class TelegramWorker {
       const item = await this.service.takeDueOutbox(now);
       if (!item) return false;
       try {
-        await this.send(item.text);
+        await this.send(item.text, item.replyToMessageId);
       } catch (error) {
         await this.persistCompletion(item.id, errorMessage(error), now);
         return true;
@@ -69,11 +69,11 @@ function asError(value: unknown): Error { return value instanceof Error ? value 
 function errorMessage(value: unknown): string { return value instanceof Error ? value.message : 'Telegram delivery failed'; }
 
 export function createTelegramSender(botToken: string, chatId: string): TelegramSender {
-  return async (text: string) => {
+  return async (text: string, replyToMessageId?: number) => {
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      body: JSON.stringify({ chat_id: chatId, text, reply_parameters: replyToMessageId === undefined ? undefined : { message_id: replyToMessageId, allow_sending_without_reply: true } }),
       signal: AbortSignal.timeout(10_000),
     });
     const result = await response.json().catch(() => null) as { ok?: boolean; description?: string } | null;

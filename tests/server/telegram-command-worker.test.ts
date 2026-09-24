@@ -25,7 +25,7 @@ describe('TelegramCommandWorker', () => {
     expect(await worker.pollOnce()).toBe(1);
     expect(await worker.pollOnce()).toBe(0);
     expect(offsets).toEqual([undefined, 22]);
-    expect(handled).toEqual([{ updateId: 21, chatId: '-100123', messageId: 121, userId: '42', username: 'nguyenan', text: '/connect Nguyễn An', entities: [] }]);
+    expect(handled).toEqual([{ updateId: 21, chatId: '-100123', messageId: 121, userId: '42', username: 'nguyenan', text: '/connect Nguyễn An', entities: [], sentAt: new Date(1_795_000_000_000) }]);
     expect(replies).toEqual([{ chatId: '-100123', text: 'Đã kết nối.', messageId: 121 }]);
   });
 
@@ -116,6 +116,7 @@ function update(updateId: number, chatId: string, firstName: string, text: strin
     update_id: updateId,
     message: {
       message_id: updateId + 100,
+      date: 1_795_000_000,
       chat: { id: Number(chatId), type: 'supergroup' },
       from: { id: 42, is_bot: isBot, first_name: firstName, username },
       text,

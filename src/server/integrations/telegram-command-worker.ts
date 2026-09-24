@@ -7,6 +7,7 @@ export interface TelegramUpdate {
   update_id: number;
   message?: {
     message_id: number;
+    date: number;
     text?: string;
     entities?: TelegramMessageEntity[];
     chat: { id: number; type: string };
@@ -93,6 +94,7 @@ export class TelegramCommandWorker {
           username: sender.username ?? null,
           text,
           entities: message.entities ?? [],
+          sentAt: new Date(message.date * 1_000),
         });
         if (result.reply) await this.client.sendReply(this.chatId, result.reply, result.replyToMessageId ?? message.message_id);
       } catch (cause) {

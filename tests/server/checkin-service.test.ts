@@ -266,19 +266,20 @@ describe('CheckinService', () => {
     await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: 'requester', text: '/connect Nguyễn An' });
     await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: 'witness', text: '/connect Trần Bình' });
     await service.handleTelegramUpdate({ updateId: 3, userId: '300', username: 'boss', text: '/connect Admin' });
+    await repository.mutate((state) => { state.outbox = []; });
 
     const requested = await service.handleTelegramUpdate({
       updateId: 4, chatId: '-100', messageId: 44, userId: '100', username: 'requester',
       text: '/in @witness 09:00', entities: [{ type: 'mention', offset: 4, length: 8 }],
       now: new Date('2026-09-24T03:00:00.000Z'),
     });
-    expect(requested).toMatchObject({ processed: true, replyToMessageId: 44 });
-    expect(requested.reply).toContain('Đang chờ');
+    expect(requested).toMatchObject({ processed: true, reply: null, replyToMessageId: null });
+    expect(await service.takeDueOutbox(new Date('2026-09-24T03:00:01.000Z'))).toMatchObject({ text: expect.stringContaining('Đang chờ'), replyToMessageId: 44 });
 
     expect(await service.handleTelegramReaction({ updateId: 5, chatId: '-100', messageId: 44, userId: '300', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:01:00.000Z') }))
-      .toMatchObject({ reply: expect.stringContaining('chờ người làm chứng'), replyToMessageId: 44 });
+      .toMatchObject({ reply: null, replyToMessageId: null });
     expect(await service.handleTelegramReaction({ updateId: 6, chatId: '-100', messageId: 44, userId: '200', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:02:00.000Z') }))
-      .toMatchObject({ reply: expect.stringContaining('Check-in thành công'), replyToMessageId: 44 });
+      .toMatchObject({ reply: null, replyToMessageId: null });
 
     const row = (await service.dashboard(actor)).members.find((item) => item.id === requester.account.id);
     expect(row).toMatchObject({ isOnline: true, openSince: '2026-09-24T02:00:00.000Z' });
@@ -295,16 +296,52 @@ describe('CheckinService', () => {
     await service.createAccount(actor, 'Trần Bình');
     await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: 'requester', text: '/connect Nguyễn An' });
     await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: 'witness', text: '/connect Trần Bình' });
+    await repository.mutate((state) => { state.outbox = []; });
     await service.handleTelegramUpdate({
       updateId: 3, chatId: '-100', messageId: 50, userId: '100', username: 'requester', text: '/in @witness 09:00',
       entities: [{ type: 'mention', offset: 4, length: 8 }], now: new Date('2026-09-24T03:00:00.000Z'),
     });
+    await repository.mutate((state) => { state.outbox = []; });
 
     expect(await service.handleTelegramReaction({ updateId: 4, chatId: '-100', messageId: 50, userId: '999', emoji: ['❤'], removed: false })).toMatchObject({ reply: null });
     expect(await service.handleTelegramReaction({ updateId: 5, chatId: '-100', messageId: 50, userId: '200', emoji: [], removed: true })).toMatchObject({ reply: null });
     expect(await service.handleTelegramReaction({ updateId: 6, chatId: '-100', messageId: 50, userId: '200', emoji: ['❤'], removed: false, now: new Date('2026-09-24T15:00:01.000Z') }))
-      .toMatchObject({ reply: expect.stringContaining('hết hạn'), replyToMessageId: 50 });
+      .toMatchObject({ reply: null, replyToMessageId: null });
+    const expiryReply = await service.takeDueOutbox(new Date('2026-09-24T15:00:02.000Z'));
+    expect(expiryReply).toMatchObject({ text: expect.stringContaining('hết hạn'), replyToMessageId: 50 });
     expect((await service.dashboard(actor)).members.find((item) => item.name === 'Nguyễn An')?.isOnline).toBe(false);
+  });
+
+  it('uses the Telegram message timestamp for an omitted date', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const requester = await service.createAccount(actor, 'Nguyễn An');
+    await service.createAccount(actor, 'Trần Bình');
+    await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: 'requester', text: '/connect Nguyễn An' });
+    await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: 'witness', text: '/connect Trần Bình' });
+    await service.handleTelegramUpdate({
+      updateId: 3, chatId: '-100', messageId: 60, userId: '100', username: 'requester', text: '/in @witness 23:30',
+      entities: [{ type: 'mention', offset: 4, length: 8 }], sentAt: new Date('2026-09-23T16:59:00.000Z'), now: new Date('2026-09-23T17:01:00.000Z'),
+    });
+    const event = (await service.audit(actor)).find((item) => item.type === 'TELEGRAM_CHECKIN_REQUESTED');
+    expect(event?.accountId).toBe(requester.account.id);
+    expect(event?.payload).toMatchObject({ requestedAt: '2026-09-23T16:30:00.000Z', expiresAt: '2026-09-24T04:59:00.000Z' });
+  });
+
+  it('refuses completion when an approved witness is later disabled', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const requester = await service.createAccount(actor, 'Nguyễn An');
+    const witness = await service.createAccount(actor, 'Trần Bình');
+    await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: null, text: '/connect Nguyễn An' });
+    await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: null, text: '/connect Trần Bình' });
+    await service.handleTelegramUpdate({ updateId: 3, userId: '300', username: null, text: '/connect Admin' });
+    await service.handleTelegramUpdate({ updateId: 4, chatId: '-100', messageId: 70, userId: '100', username: null, text: '/in @witness 09:00', entities: [{ type: 'mention', offset: 4, length: 8 }], now: new Date('2026-09-24T03:00:00.000Z') });
+    await service.handleTelegramReaction({ updateId: 5, chatId: '-100', messageId: 70, userId: '200', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:01:00.000Z') });
+    await service.updateAccount(actor, witness.account.id, { active: false });
+    await service.handleTelegramReaction({ updateId: 6, chatId: '-100', messageId: 70, userId: '300', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:02:00.000Z') });
+    expect((await service.dashboard(actor)).members.find((item) => item.id === requester.account.id)?.isOnline).toBe(false);
+    expect((await service.audit(actor)).some((item) => item.type === 'TELEGRAM_CHECKIN_COMPLETED')).toBe(false);
   });
 
   it('rolls back a failed Telegram command while remembering the update', async () => {

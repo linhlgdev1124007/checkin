@@ -39,15 +39,17 @@ describe('TelegramWorker', () => {
     let acknowledgements = 0;
     let offered = false;
     const service = {
-      takeDueOutbox: async () => offered ? null : (offered = true, { id: 'message-1', text: 'hello' }),
+      takeDueOutbox: async () => offered ? null : (offered = true, { id: 'message-1', text: 'hello', replyToMessageId: 44 }),
       finishOutbox: async () => { acknowledgements += 1; if (acknowledgements === 1) throw new Error('database unavailable'); },
     };
     const errors: string[] = [];
-    const worker = new TelegramWorker(service, async () => { sends += 1; }, (error) => errors.push(error.message));
+    let replyToMessageId: number | undefined;
+    const worker = new TelegramWorker(service, async (_text, replyTo) => { sends += 1; replyToMessageId = replyTo; }, (error) => errors.push(error.message));
 
     expect(await worker.deliverOnce()).toBe(true);
     expect(await worker.deliverOnce()).toBe(true);
     expect(sends).toBe(1);
+    expect(replyToMessageId).toBe(44);
     expect(acknowledgements).toBe(2);
     expect(errors).toEqual(['database unavailable']);
   });
