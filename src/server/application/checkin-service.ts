@@ -3,6 +3,8 @@ import argon2 from 'argon2';
 import type { StateRepository } from '../data/state-repository.js';
 import type { AccountRecord, Role, StateDocument } from '../data/state-types.js';
 import { applyAttendanceEvents, formatDuration, type AttendanceEvent } from '../domain/attendance.js';
+import { projectTelegramCheckInRequests, telegramRequestKey, type TelegramCheckInRequestEvent } from '../domain/telegram-approval.js';
+import { parseWitnessedCheckIn, type TelegramMessageEntity } from '../domain/telegram-checkin-request.js';
 import { decryptBuffer, decryptJson, deriveKey, encryptBuffer, encryptJson, randomKey, type SealedValue } from '../security/crypto.js';
 import { generateLoginKey, parseLoginKey } from '../security/login-key.js';
 import { Vault } from '../security/vault.js';
@@ -28,9 +30,22 @@ export interface TelegramTemplates {
 
 export interface TelegramCommandInput {
   updateId: number;
+  chatId?: string;
+  messageId?: number;
   userId: string;
   username: string | null;
   text: string;
+  entities?: TelegramMessageEntity[];
+  now?: Date;
+}
+
+export interface TelegramReactionInput {
+  updateId: number;
+  chatId: string;
+  messageId: number;
+  userId: string | null;
+  emoji: string[];
+  removed: boolean;
   now?: Date;
 }
 
@@ -333,7 +348,7 @@ export class CheckinService {
     });
   }
 
-  async handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null }> {
+  async handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null; replyToMessageId?: number | null }> {
     const key = this.vault.requireKey();
     const now = input.now ?? new Date();
     return this.repository.mutate((state) => {
@@ -345,10 +360,29 @@ export class CheckinService {
         const reply = handleTelegramCommandInState(commandState, key, settings, input, now);
         recordTelegramUpdate(commandState, input.updateId, now);
         Object.assign(state, commandState);
-        return { processed: true, reply };
+        return { processed: true, reply, ...(input.messageId === undefined ? {} : { replyToMessageId: reply ? input.messageId : null }) };
       } catch (cause) {
         recordTelegramUpdate(state, input.updateId, now);
-        return { processed: true, reply: telegramErrorMessage(cause) };
+        return { processed: true, reply: telegramErrorMessage(cause), ...(input.messageId === undefined ? {} : { replyToMessageId: input.messageId }) };
+      }
+    });
+  }
+
+  async handleTelegramReaction(input: TelegramReactionInput): Promise<{ processed: boolean; reply: string | null; replyToMessageId: number | null }> {
+    const key = this.vault.requireKey();
+    const now = input.now ?? new Date();
+    return this.repository.mutate((state) => {
+      migrateTelegramCursor(state, key, now);
+      if (!shouldProcessTelegramUpdate(state, input.updateId, now)) return { processed: false, reply: null, replyToMessageId: null };
+      const reactionState = structuredClone(state);
+      try {
+        const reply = handleTelegramReactionInState(reactionState, key, input, now);
+        recordTelegramUpdate(reactionState, input.updateId, now);
+        Object.assign(state, reactionState);
+        return { processed: true, reply, replyToMessageId: reply ? input.messageId : null };
+      } catch (cause) {
+        recordTelegramUpdate(state, input.updateId, now);
+        return { processed: true, reply: telegramErrorMessage(cause), replyToMessageId: input.messageId };
       }
     });
   }
@@ -781,6 +815,24 @@ function handleTelegramCommandInState(
   const profile = decryptProfile(key, linked);
   const actor: Actor = { id: linked.id, role: linked.role, name: profile.name };
   if (command === 'in') {
+    const witnessed = parseWitnessedCheckIn({ text: input.text, entities: input.entities ?? [], now });
+    if (witnessed) {
+      if (input.chatId === undefined || input.messageId === undefined) throw new Error('INVALID_WITNESSED_CHECKIN');
+      const requests = telegramRequestProjection(state, key);
+      if (requests.has(telegramRequestKey(input.chatId, input.messageId))) return 'Yêu cầu check-in này đã được ghi nhận.';
+      const witness = resolveTelegramWitness(state, key, witnessed.witness);
+      if (witness.role !== 'member') throw new Error('TELEGRAM_WITNESS_MUST_BE_MEMBER');
+      if (witness.id === linked.id) throw new Error('TELEGRAM_SELF_WITNESS');
+      appendEvent(state, key, linked.id, linked.id, 'TELEGRAM_CHECKIN_REQUESTED', {
+        chatId: input.chatId,
+        messageId: input.messageId,
+        requesterAccountId: linked.id,
+        witnessAccountId: witness.id,
+        requestedAt: witnessed.requestedAt,
+        expiresAt: witnessed.expiresAt,
+      }, now);
+      return `Đã tạo yêu cầu check-in lúc ${formatVietnamDateTime(witnessed.requestedAt)}. Đang chờ người làm chứng và admin thả ❤️.`;
+    }
     changeAttendanceInState(state, key, actor, 'CHECKED_IN', now);
     return null;
   }
@@ -795,6 +847,87 @@ function handleTelegramCommandInState(
   return 'Lệnh không hợp lệ. Dùng /connect Họ tên, /in, /out hoặc /status.';
 }
 
+function handleTelegramReactionInState(
+  state: StateDocument,
+  key: Buffer,
+  input: TelegramReactionInput,
+  now: Date,
+): string | null {
+  if (input.removed || input.userId === null || !input.emoji.some(isHeartReaction)) return null;
+  const request = telegramRequestProjection(state, key).get(telegramRequestKey(input.chatId, input.messageId));
+  if (!request || request.status !== 'pending') return null;
+  const reacting = findLinkedTelegramAccount(state, key, input.userId);
+  if (!reacting) return null;
+  if (now.getTime() > Date.parse(request.expiresAt)) {
+    appendEvent(state, key, request.requesterAccountId, reacting.id, 'TELEGRAM_CHECKIN_EXPIRED', {
+      chatId: input.chatId, messageId: input.messageId,
+    }, now);
+    return 'Yêu cầu check-in đã hết hạn.';
+  }
+
+  let approvalType: 'TELEGRAM_CHECKIN_WITNESS_APPROVED' | 'TELEGRAM_CHECKIN_ADMIN_APPROVED' | null = null;
+  if (reacting.id === request.witnessAccountId && !request.witnessApprovedBy) approvalType = 'TELEGRAM_CHECKIN_WITNESS_APPROVED';
+  else if (reacting.role === 'admin' && reacting.id !== request.witnessAccountId && !request.adminApprovedBy) approvalType = 'TELEGRAM_CHECKIN_ADMIN_APPROVED';
+  if (!approvalType) return null;
+
+  appendEvent(state, key, request.requesterAccountId, reacting.id, approvalType, {
+    chatId: input.chatId, messageId: input.messageId, approverAccountId: reacting.id,
+  }, now);
+  const afterApproval = telegramRequestProjection(state, key).get(telegramRequestKey(input.chatId, input.messageId))!;
+  if (!afterApproval.witnessApprovedBy) return 'Admin đã duyệt. Đang chờ người làm chứng thả ❤️.';
+  if (!afterApproval.adminApprovedBy) return 'Người làm chứng đã duyệt. Đang chờ admin thả ❤️.';
+
+  const requester = requireActiveAccount(state, key, request.requesterAccountId);
+  const requesterProfile = decryptProfile(key, requester);
+  const result = changeAttendanceInState(state, key, {
+    id: requester.id, role: requester.role, name: requesterProfile.name,
+  }, 'CHECKED_IN', new Date(request.requestedAt));
+  appendEvent(state, key, requester.id, reacting.id, 'TELEGRAM_CHECKIN_COMPLETED', {
+    chatId: input.chatId, messageId: input.messageId, sessionId: result.sessionId,
+  }, now);
+  return `Đã đủ xác nhận. Check-in thành công lúc ${formatVietnamDateTime(request.requestedAt)}.`;
+}
+
+function telegramRequestProjection(state: StateDocument, key: Buffer) {
+  const types = new Set([
+    'TELEGRAM_CHECKIN_REQUESTED', 'TELEGRAM_CHECKIN_WITNESS_APPROVED', 'TELEGRAM_CHECKIN_ADMIN_APPROVED',
+    'TELEGRAM_CHECKIN_COMPLETED', 'TELEGRAM_CHECKIN_EXPIRED',
+  ]);
+  const events = state.events.filter((event) => types.has(event.type)).map((event) => ({
+    type: event.type,
+    ...decryptEvent<Record<string, unknown>>(key, event),
+  })) as TelegramCheckInRequestEvent[];
+  return projectTelegramCheckInRequests(events);
+}
+
+function resolveTelegramWitness(state: StateDocument, key: Buffer, witness: { userId?: string; username?: string }): AccountRecord {
+  const account = state.accounts.find((candidate) => {
+    if (!candidate.active) return false;
+    assertAccountIntegrity(key, candidate);
+    const identity = decryptProfile(key, candidate).telegram;
+    if (!identity) return false;
+    if (witness.userId !== undefined) return identity.userId === witness.userId;
+    return identity.username?.toLowerCase() === witness.username?.toLowerCase();
+  });
+  if (!account) throw new Error('TELEGRAM_WITNESS_NOT_LINKED');
+  return account;
+}
+
+function findLinkedTelegramAccount(state: StateDocument, key: Buffer, userId: string): AccountRecord | null {
+  const account = state.accounts.find((candidate) => candidate.active && decryptProfile(key, candidate).telegram?.userId === userId) ?? null;
+  if (account) assertAccountIntegrity(key, account);
+  return account;
+}
+
+function isHeartReaction(emoji: string): boolean {
+  return emoji.replace(/\uFE0F/g, '') === '❤';
+}
+
+function formatVietnamDateTime(iso: string): string {
+  const date = new Date(Date.parse(iso) + 7 * 60 * 60 * 1_000);
+  return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')} ngày ${String(date.getUTCDate()).padStart(2, '0')}/${String(date.getUTCMonth() + 1).padStart(2, '0')}/${date.getUTCFullYear()}`;
+}
+
 function telegramErrorMessage(cause: unknown): string {
   const code = cause instanceof Error ? cause.message : 'UNKNOWN';
   const messages: Record<string, string> = {
@@ -806,6 +939,13 @@ function telegramErrorMessage(cause: unknown): string {
     ALREADY_CHECKED_IN: 'Bạn đã check in.',
     NOT_CHECKED_IN: 'Bạn chưa check in.',
     ACCOUNT_DISABLED: 'Tài khoản đã bị vô hiệu hóa.',
+    INVALID_WITNESSED_CHECKIN: 'Cú pháp: /in @người_làm_chứng HH:mm [DD/MM/YYYY].',
+    ATTENDANCE_TOO_OLD: 'Thời điểm check-in chỉ được nằm trong 12 giờ gần nhất.',
+    ATTENDANCE_IN_FUTURE: 'Không thể check-in ở thời điểm tương lai.',
+    TELEGRAM_WITNESS_NOT_LINKED: 'Người làm chứng chưa liên kết tài khoản đang hoạt động.',
+    TELEGRAM_WITNESS_MUST_BE_MEMBER: 'Người làm chứng phải là tài khoản thành viên.',
+    TELEGRAM_SELF_WITNESS: 'Bạn không thể tự làm chứng cho yêu cầu của mình.',
+    ATTENDANCE_OVERLAP: 'Thời điểm check-in bị trùng với phiên đã có.',
   };
   return messages[code] ?? 'Không thể xử lý lệnh lúc này.';
 }

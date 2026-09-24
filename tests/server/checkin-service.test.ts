@@ -258,6 +258,55 @@ describe('CheckinService', () => {
     expect(JSON.stringify(await repository.read())).not.toContain('9001');
   });
 
+  it('records a witnessed Telegram check-in only after witness and admin hearts', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const requester = await service.createAccount(actor, 'Nguyễn An');
+    const witness = await service.createAccount(actor, 'Trần Bình');
+    await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: 'requester', text: '/connect Nguyễn An' });
+    await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: 'witness', text: '/connect Trần Bình' });
+    await service.handleTelegramUpdate({ updateId: 3, userId: '300', username: 'boss', text: '/connect Admin' });
+
+    const requested = await service.handleTelegramUpdate({
+      updateId: 4, chatId: '-100', messageId: 44, userId: '100', username: 'requester',
+      text: '/in @witness 09:00', entities: [{ type: 'mention', offset: 4, length: 8 }],
+      now: new Date('2026-09-24T03:00:00.000Z'),
+    });
+    expect(requested).toMatchObject({ processed: true, replyToMessageId: 44 });
+    expect(requested.reply).toContain('Đang chờ');
+
+    expect(await service.handleTelegramReaction({ updateId: 5, chatId: '-100', messageId: 44, userId: '300', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:01:00.000Z') }))
+      .toMatchObject({ reply: expect.stringContaining('chờ người làm chứng'), replyToMessageId: 44 });
+    expect(await service.handleTelegramReaction({ updateId: 6, chatId: '-100', messageId: 44, userId: '200', emoji: ['❤'], removed: false, now: new Date('2026-09-24T03:02:00.000Z') }))
+      .toMatchObject({ reply: expect.stringContaining('Check-in thành công'), replyToMessageId: 44 });
+
+    const row = (await service.dashboard(actor)).members.find((item) => item.id === requester.account.id);
+    expect(row).toMatchObject({ isOnline: true, openSince: '2026-09-24T02:00:00.000Z' });
+    expect((await service.audit(actor)).filter((event) => event.type.startsWith('TELEGRAM_CHECKIN_')).map((event) => event.type)).toEqual([
+      'TELEGRAM_CHECKIN_COMPLETED', 'TELEGRAM_CHECKIN_WITNESS_APPROVED', 'TELEGRAM_CHECKIN_ADMIN_APPROVED', 'TELEGRAM_CHECKIN_REQUESTED',
+    ]);
+    expect(JSON.stringify(await repository.read())).not.toContain('-100');
+  });
+
+  it('ignores unrelated and removed reactions and expires pending requests', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    await service.createAccount(actor, 'Nguyễn An');
+    await service.createAccount(actor, 'Trần Bình');
+    await service.handleTelegramUpdate({ updateId: 1, userId: '100', username: 'requester', text: '/connect Nguyễn An' });
+    await service.handleTelegramUpdate({ updateId: 2, userId: '200', username: 'witness', text: '/connect Trần Bình' });
+    await service.handleTelegramUpdate({
+      updateId: 3, chatId: '-100', messageId: 50, userId: '100', username: 'requester', text: '/in @witness 09:00',
+      entities: [{ type: 'mention', offset: 4, length: 8 }], now: new Date('2026-09-24T03:00:00.000Z'),
+    });
+
+    expect(await service.handleTelegramReaction({ updateId: 4, chatId: '-100', messageId: 50, userId: '999', emoji: ['❤'], removed: false })).toMatchObject({ reply: null });
+    expect(await service.handleTelegramReaction({ updateId: 5, chatId: '-100', messageId: 50, userId: '200', emoji: [], removed: true })).toMatchObject({ reply: null });
+    expect(await service.handleTelegramReaction({ updateId: 6, chatId: '-100', messageId: 50, userId: '200', emoji: ['❤'], removed: false, now: new Date('2026-09-24T15:00:01.000Z') }))
+      .toMatchObject({ reply: expect.stringContaining('hết hạn'), replyToMessageId: 50 });
+    expect((await service.dashboard(actor)).members.find((item) => item.name === 'Nguyễn An')?.isOnline).toBe(false);
+  });
+
   it('rolls back a failed Telegram command while remembering the update', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
