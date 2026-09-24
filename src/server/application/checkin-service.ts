@@ -254,7 +254,7 @@ export class CheckinService {
     requireAdmin(actor);
     const key = this.vault.requireKey();
     await this.repository.mutate((state) => {
-      const account = requireMember(state, key, accountId);
+      const account = requireActiveAccount(state, key, accountId);
       const profile = decryptProfile(key, account);
       if (!profile.telegram) return;
       delete profile.telegram;
@@ -752,7 +752,7 @@ function handleTelegramCommandInState(
     if (!argument) return 'Cú pháp: /connect Họ tên';
     const wantedName = normalizedNameKey(validateName(argument));
     const matches = state.accounts.filter((account) => {
-      if (account.role !== 'member' || !account.active) return false;
+      if (!account.active) return false;
       assertAccountIntegrity(key, account);
       return normalizedNameKey(decryptProfile(key, account).name) === wantedName;
     });
@@ -848,6 +848,13 @@ function requireMember(state: StateDocument, key: Buffer, accountId: string): Ac
   const account = requireAccount(state, accountId);
   assertAccountIntegrity(key, account);
   if (account.role === 'admin') throw new Error('ADMIN_IMMUTABLE');
+  return account;
+}
+
+function requireActiveAccount(state: StateDocument, key: Buffer, accountId: string): AccountRecord {
+  const account = requireAccount(state, accountId);
+  assertAccountIntegrity(key, account);
+  if (!account.active) throw new Error('ACCOUNT_DISABLED');
   return account;
 }
 

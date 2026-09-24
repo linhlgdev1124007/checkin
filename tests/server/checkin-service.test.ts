@@ -247,6 +247,17 @@ describe('CheckinService', () => {
     expect((await service.handleTelegramUpdate({ updateId: 12, userId: '123456', username: 'nguyenan', text: '/status' })).reply).toContain('/connect');
   });
 
+  it('allows the active administrator to connect a Telegram identity', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+
+    expect(await service.handleTelegramUpdate({ updateId: 10, userId: '9001', username: 'boss', text: '/connect Admin' }))
+      .toMatchObject({ processed: true });
+    expect((await service.listAccounts(actor)).find((account) => account.role === 'admin'))
+      .toMatchObject({ telegramLinked: true, telegramUsername: 'boss' });
+    expect(JSON.stringify(await repository.read())).not.toContain('9001');
+  });
+
   it('rolls back a failed Telegram command while remembering the update', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);
