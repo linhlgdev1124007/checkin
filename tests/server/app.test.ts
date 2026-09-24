@@ -59,5 +59,10 @@ describe('Express API', () => {
 
     const dashboard = await agent.get('/api/dashboard').expect(200);
     expect(dashboard.body.members.find((member: { id: string }) => member.id === created.body.account.id).completedMilliseconds).toBe(1_800_000);
+
+    const history = await agent.get('/api/attendance/history?from=2026-09-22&to=2026-09-24').expect(200);
+    expect(history.body).toMatchObject({ from: '2026-09-22', to: '2026-09-24' });
+    expect(history.body.members.find((member: { id: string }) => member.id === created.body.account.id).days).toHaveLength(3);
+    await agent.get('/api/attendance/history?from=2026-09-24&to=2026-09-22').expect(422);
   });
 });

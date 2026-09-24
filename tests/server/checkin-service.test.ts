@@ -118,6 +118,42 @@ describe('CheckinService', () => {
     expect((await repository.read())?.outbox).toHaveLength(2);
   });
 
+  it('summarizes attendance by Vietnam calendar day for a selected range', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+    const member = await service.createAccount(actor, 'Nguyễn An');
+    const memberActor = await service.authenticate((await service.login(member.key)).token);
+
+    await service.checkIn(memberActor, new Date('2026-09-21T16:30:00.000Z'));
+    await service.checkOut(memberActor, new Date('2026-09-21T18:30:00.000Z'));
+    await service.checkIn(memberActor, new Date('2026-09-23T03:00:00.000Z'));
+    await service.checkOut(memberActor, new Date('2026-09-23T05:00:00.000Z'));
+    await service.adjustAttendance(actor, member.account.id, 1_800_000, 'Bổ sung họp', new Date('2026-09-23T06:00:00.000Z'));
+    await service.checkIn(memberActor, new Date('2026-09-24T02:00:00.000Z'));
+
+    const history = await service.attendanceHistory(
+      actor,
+      '2026-09-22',
+      '2026-09-24',
+      new Date('2026-09-24T03:15:00.000Z'),
+    );
+    const days = history.members.find((item) => item.id === member.account.id)?.days;
+
+    expect(days).toEqual([
+      { date: '2026-09-22', durationMilliseconds: 5_400_000, sessionCount: 1, adjustmentMilliseconds: 0 },
+      { date: '2026-09-23', durationMilliseconds: 9_000_000, sessionCount: 1, adjustmentMilliseconds: 1_800_000 },
+      { date: '2026-09-24', durationMilliseconds: 4_500_000, sessionCount: 1, adjustmentMilliseconds: 0 },
+    ]);
+  });
+
+  it('rejects invalid attendance history ranges', async () => {
+    const admin = await service.setup('Admin');
+    const actor = await service.authenticate(admin.token);
+
+    await expect(service.attendanceHistory(actor, '2026-09-24', '2026-09-22')).rejects.toThrow('INVALID_DATE_RANGE');
+    await expect(service.attendanceHistory(actor, '2026-01-01', '2026-04-01')).rejects.toThrow('DATE_RANGE_TOO_LARGE');
+  });
+
   it('keeps the original attendance events when an admin corrects a session', async () => {
     const admin = await service.setup('Admin');
     const actor = await service.authenticate(admin.token);

@@ -80,6 +80,13 @@ export function createApp(service: CheckinService, options: AppOptions = {}) {
   }));
 
   app.get('/api/dashboard', asyncRoute(async (request, response) => response.json(await service.dashboard(await actor(request)))));
+  app.get('/api/attendance/history', asyncRoute(async (request, response) => {
+    const input = z.object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    }).parse(request.query);
+    response.json(await service.attendanceHistory(await actor(request), input.from, input.to));
+  }));
   app.post('/api/attendance/check-in', asyncRoute(async (request, response) => response.status(201).json(await service.checkIn(await actor(request)))));
   app.post('/api/attendance/check-out', asyncRoute(async (request, response) => response.status(201).json(await service.checkOut(await actor(request)))));
   app.post('/api/admin/attendance/:accountId/:sessionId/corrections', asyncRoute(async (request, response) => {
@@ -148,6 +155,7 @@ function apiError(code: string) {
     NOT_CHECKED_IN: 'Bạn chưa check in.', INVALID_BACKUP: 'File backup hoặc key không hợp lệ.',
     ACCOUNT_NAME_EXISTS: 'Tên thành viên đã tồn tại.', NEGATIVE_ATTENDANCE_TOTAL: 'Không thể trừ khiến tổng thời gian nhỏ hơn 0.',
     INVALID_TEMPLATE: 'Mẫu tin nhắn chứa biến không hợp lệ.', ADJUSTMENT_REASON_REQUIRED: 'Bạn phải nhập lý do điều chỉnh.',
+    INVALID_DATE_RANGE: 'Khoảng ngày không hợp lệ.', DATE_RANGE_TOO_LARGE: 'Chỉ được xem tối đa 90 ngày.',
   };
   return { error: { code, message: messages[code] ?? 'Không thể thực hiện yêu cầu.' } };
 }
@@ -159,7 +167,7 @@ function statusFor(code: string): number {
   if (['NOT_FOUND', 'ACCOUNT_NOT_FOUND', 'OUTBOX_NOT_FOUND'].includes(code)) return 404;
   if (['ALREADY_INITIALIZED', 'ALREADY_CHECKED_IN', 'NOT_CHECKED_IN', 'ATTENDANCE_OVERLAP', 'ACCOUNT_NAME_EXISTS', 'NEGATIVE_ATTENDANCE_TOTAL'].includes(code)) return 409;
   if (code === 'SYSTEM_LOCKED') return 423;
-  if (code.startsWith('INVALID_') || code.endsWith('_REQUIRED') || code === 'ATTENDANCE_IN_FUTURE') return 422;
+  if (code.startsWith('INVALID_') || code.endsWith('_REQUIRED') || code === 'ATTENDANCE_IN_FUTURE' || code === 'DATE_RANGE_TOO_LARGE') return 422;
   return 500;
 }
 

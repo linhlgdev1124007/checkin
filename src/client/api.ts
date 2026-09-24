@@ -1,6 +1,8 @@
 export type Role = 'admin' | 'member';
 export interface Account { id: string; name: string; role: Role; active?: boolean; createdAt?: string; telegramLinked?: boolean; telegramUsername?: string | null }
 export interface DashboardMember { id: string; name: string; completedMilliseconds: number; isOnline: boolean; openSince: string | null }
+export interface AttendanceHistoryDay { date: string; durationMilliseconds: number; sessionCount: number; adjustmentMilliseconds: number }
+export interface AttendanceHistoryMember { id: string; name: string; days: AttendanceHistoryDay[] }
 export interface AuditEntry { id: string; type: string; accountId: string; actorId: string; createdAt: string; payload: Record<string, unknown> }
 export interface OutboxItem { id: string; status: string; attempts: number; nextAttemptAt: string; lastError: string | null }
 export interface TelegramTemplates { checkIn: string; checkOut: string; adjustment: string; connected: string }
@@ -14,6 +16,7 @@ export interface Api {
   logout(): Promise<void>;
   lock(): Promise<void>;
   dashboard(): Promise<{ now: string; members: DashboardMember[] }>;
+  attendanceHistory(from: string, to: string): Promise<{ from: string; to: string; members: AttendanceHistoryMember[] }>;
   checkIn(): Promise<{ sessionId: string }>;
   checkOut(): Promise<{ sessionId: string }>;
   accounts(): Promise<{ accounts: Account[] }>;
@@ -62,6 +65,7 @@ export const api: Api = {
   logout: () => request('/api/auth/logout', json('POST')),
   lock: () => request('/api/system/lock', json('POST')),
   dashboard: () => request('/api/dashboard'),
+  attendanceHistory: (from, to) => request(`/api/attendance/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   checkIn: () => request('/api/attendance/check-in', json('POST')),
   checkOut: () => request('/api/attendance/check-out', json('POST')),
   accounts: () => request('/api/accounts'),

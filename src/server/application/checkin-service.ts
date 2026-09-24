@@ -34,6 +34,13 @@ export interface TelegramCommandInput {
   now?: Date;
 }
 
+export interface AttendanceHistoryDay {
+  date: string;
+  durationMilliseconds: number;
+  sessionCount: number;
+  adjustmentMilliseconds: number;
+}
+
 interface TelegramSettings { templates: TelegramTemplates; lastUpdateId?: number; lastUpdateAt?: string }
 
 export const DEFAULT_TELEGRAM_TEMPLATES: TelegramTemplates = {
@@ -369,6 +376,25 @@ export class CheckinService {
     return { now: now.toISOString(), members };
   }
 
+  async attendanceHistory(_actor: Actor, from: string, to: string, now = new Date()): Promise<{
+    from: string;
+    to: string;
+    members: Array<{ id: string; name: string; days: AttendanceHistoryDay[] }>;
+  }> {
+    const dates = vietnamDateRange(from, to);
+    const key = this.vault.requireKey();
+    const state = await this.requireDocument();
+    const members = state.accounts.filter((account) => account.active).map((account) => {
+      assertAccountIntegrity(key, account);
+      return {
+        id: account.id,
+        name: decryptProfile(key, account).name,
+        days: attendanceDays(state, key, account.id, dates, now),
+      };
+    }).sort((left, right) => left.name.localeCompare(right.name, 'vi'));
+    return { from, to, members };
+  }
+
   async audit(actor: Actor): Promise<Array<{ id: string; type: string; accountId: string; actorId: string; createdAt: string; payload: unknown }>> {
     requireAdmin(actor);
     const key = this.vault.requireKey();
@@ -524,6 +550,60 @@ function attendanceProjection(state: StateDocument, key: Buffer, accountId: stri
     .filter((event) => event.accountId === accountId && attendanceTypes.has(event.type))
     .map((event) => ({ type: event.type, ...decryptEvent<Record<string, unknown>>(key, event) })) as AttendanceEvent[];
   return applyAttendanceEvents(events);
+}
+
+const VIETNAM_OFFSET_MILLISECONDS = 7 * 60 * 60 * 1_000;
+const DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
+
+function vietnamDateRange(from: string, to: string): string[] {
+  const pattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (!pattern.test(from) || !pattern.test(to)) throw new Error('INVALID_DATE_RANGE');
+  const start = Date.parse(`${from}T00:00:00+07:00`);
+  const end = Date.parse(`${to}T00:00:00+07:00`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || vietnamDate(new Date(start)) !== from || vietnamDate(new Date(end)) !== to || end < start) {
+    throw new Error('INVALID_DATE_RANGE');
+  }
+  const count = Math.floor((end - start) / DAY_MILLISECONDS) + 1;
+  if (count > 90) throw new Error('DATE_RANGE_TOO_LARGE');
+  return Array.from({ length: count }, (_value, index) => vietnamDate(new Date(start + index * DAY_MILLISECONDS)));
+}
+
+function attendanceDays(state: StateDocument, key: Buffer, accountId: string, dates: string[], now: Date): AttendanceHistoryDay[] {
+  const projection = attendanceProjection(state, key, accountId);
+  const adjustments = new Map<string, number>();
+  for (const event of state.events) {
+    if (event.accountId !== accountId || event.type !== 'ATTENDANCE_ADJUSTED') continue;
+    const payload = decryptEvent<{ adjustmentMilliseconds: number }>(key, event);
+    const date = vietnamDate(new Date(event.createdAt));
+    adjustments.set(date, (adjustments.get(date) ?? 0) + payload.adjustmentMilliseconds);
+  }
+
+  return dates.map((date) => {
+    const start = Date.parse(`${date}T00:00:00+07:00`);
+    const end = start + DAY_MILLISECONDS;
+    let sessionMilliseconds = 0;
+    let sessionCount = 0;
+    for (const session of projection.sessions) {
+      const sessionStart = Date.parse(session.effectiveStartAt);
+      const sessionEnd = Math.min(session.effectiveEndAt ? Date.parse(session.effectiveEndAt) : now.getTime(), now.getTime());
+      const overlap = Math.max(0, Math.min(sessionEnd, end) - Math.max(sessionStart, start));
+      if (overlap > 0) {
+        sessionMilliseconds += overlap;
+        sessionCount += 1;
+      }
+    }
+    const adjustmentMilliseconds = adjustments.get(date) ?? 0;
+    return {
+      date,
+      durationMilliseconds: Math.max(0, sessionMilliseconds + adjustmentMilliseconds),
+      sessionCount,
+      adjustmentMilliseconds,
+    };
+  });
+}
+
+function vietnamDate(date: Date): string {
+  return new Date(date.getTime() + VIETNAM_OFFSET_MILLISECONDS).toISOString().slice(0, 10);
 }
 
 function changeAttendanceInState(
