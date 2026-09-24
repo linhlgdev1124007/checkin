@@ -1,12 +1,25 @@
-import type { TelegramCommandInput } from '../application/checkin-service.js';
+import type { TelegramCommandInput, TelegramReactionInput } from '../application/checkin-service.js';
+import type { TelegramMessageEntity } from '../domain/telegram-checkin-request.js';
+
+interface TelegramReactionType { type: string; emoji?: string }
 
 export interface TelegramUpdate {
   update_id: number;
   message?: {
     message_id: number;
     text?: string;
+    entities?: TelegramMessageEntity[];
     chat: { id: number; type: string };
     from?: { id: number; is_bot: boolean; first_name: string; username?: string };
+  };
+  message_reaction?: {
+    chat: { id: number; type: string };
+    message_id: number;
+    user?: { id: number; is_bot: boolean; first_name: string; username?: string };
+    actor_chat?: { id: number; type: string };
+    date: number;
+    old_reaction: TelegramReactionType[];
+    new_reaction: TelegramReactionType[];
   };
 }
 
@@ -17,7 +30,8 @@ export interface TelegramCommandClient {
 }
 
 interface TelegramCommandService {
-  handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null }>;
+  handleTelegramUpdate(input: TelegramCommandInput): Promise<{ processed: boolean; reply: string | null; replyToMessageId?: number | null }>;
+  handleTelegramReaction(input: TelegramReactionInput): Promise<{ processed: boolean; reply: string | null; replyToMessageId: number | null }>;
   recordRejectedTelegramUpdate(updateId: number, now?: Date): Promise<void>;
 }
 
@@ -45,6 +59,24 @@ export class TelegramCommandWorker {
     let handled = 0;
     for (const update of updates) {
       this.nextOffset = Math.max(this.nextOffset ?? 0, update.update_id + 1);
+      const reaction = update.message_reaction;
+      if (reaction && String(reaction.chat.id) === this.chatId) {
+        handled += 1;
+        try {
+          const result = await this.service.handleTelegramReaction({
+            updateId: update.update_id,
+            chatId: String(reaction.chat.id),
+            messageId: reaction.message_id,
+            userId: reaction.user && !reaction.user.is_bot ? String(reaction.user.id) : null,
+            emoji: reaction.new_reaction.flatMap((item) => item.type === 'emoji' && item.emoji ? [item.emoji] : []),
+            removed: reaction.old_reaction.length > 0 && reaction.new_reaction.length === 0,
+          });
+          if (result.reply) await this.client.sendReply(this.chatId, result.reply, result.replyToMessageId ?? reaction.message_id);
+        } catch (cause) {
+          await this.handleFailure(update.update_id, reaction.message_id, cause, now);
+        }
+        continue;
+      }
       const message = update.message;
       const sender = message?.from;
       const text = message?.text?.trim();
@@ -55,22 +87,29 @@ export class TelegramCommandWorker {
       try {
         const result = await this.service.handleTelegramUpdate({
           updateId: update.update_id,
+          chatId: String(message.chat.id),
+          messageId: message.message_id,
           userId: String(sender.id),
           username: sender.username ?? null,
           text,
+          entities: message.entities ?? [],
         });
-        if (result.reply) await this.client.sendReply(this.chatId, result.reply, message.message_id);
+        if (result.reply) await this.client.sendReply(this.chatId, result.reply, result.replyToMessageId ?? message.message_id);
       } catch (cause) {
-        const error = asError(cause);
-        const reply = error.message === 'SYSTEM_LOCKED'
-          ? 'Hệ thống đang khóa. Admin cần mở khóa trên website trước.'
-          : 'Bot chưa thể xử lý lệnh lúc này. Vui lòng thử lại sau.';
-        if (error.message === 'SYSTEM_LOCKED') await this.service.recordRejectedTelegramUpdate(update.update_id, now);
-        if (error.message !== 'SYSTEM_LOCKED') this.reportError(error);
-        await this.client.sendReply(this.chatId, reply, message.message_id);
+        await this.handleFailure(update.update_id, message.message_id, cause, now);
       }
     }
     return handled;
+  }
+
+  private async handleFailure(updateId: number, messageId: number, cause: unknown, now: Date): Promise<void> {
+    const error = asError(cause);
+    const reply = error.message === 'SYSTEM_LOCKED'
+      ? 'Hệ thống đang khóa. Admin cần mở khóa trên website trước.'
+      : 'Bot chưa thể xử lý lệnh lúc này. Vui lòng thử lại sau.';
+    if (error.message === 'SYSTEM_LOCKED') await this.service.recordRejectedTelegramUpdate(updateId, now);
+    if (error.message !== 'SYSTEM_LOCKED') this.reportError(error);
+    await this.client.sendReply(this.chatId, reply, messageId);
   }
 
   start(): void {
@@ -112,7 +151,7 @@ export function createTelegramCommandClient(botToken: string): TelegramCommandCl
       const response = await fetch(`${endpoint}/getUpdates`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ offset, timeout: 25, allowed_updates: ['message'] }),
+        body: JSON.stringify({ offset, timeout: 25, allowed_updates: ['message', 'message_reaction'] }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
       });
       const result = await response.json().catch(() => null) as { ok?: boolean; result?: TelegramUpdate[]; description?: string } | null;
